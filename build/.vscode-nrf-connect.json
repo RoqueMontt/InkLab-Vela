@@ -1,0 +1,21 @@
+{
+  "toolchainPath": "c:\\ncs\\toolchains\\fd21892d0f",
+  "sdkPath": "c:\\Users\\broqu\\Desktop\\InkLabSW\\InkLab-Vela",
+  "board": "nucleo_g0b1re",
+  "boardDir": "c:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/boards/arm/nucleo_g0b1re",
+  "boardDirs": [
+    "c:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/boards/arm/nucleo_g0b1re"
+  ],
+  "optimizations": "none",
+  "cmakeArgs": [],
+  "confFiles": [
+    "prj.conf"
+  ],
+  "buildDirectory": "build",
+  "kconfigFragments": [],
+  "snippets": [],
+  "dtcOverlays": [
+    "boards/inklab_v1.overlay"
+  ],
+  "extraDtcOverlays": []
+}

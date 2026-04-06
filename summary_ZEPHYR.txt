@@ -1,0 +1,80 @@
+=== ZEPHYR SELECTIVE SUMMARY ===
+
+--- FILE: CMakeLists.txt ---
+
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(inklab_blinky)
+
+target_sources(app PRIVATE src/main.c)
+
+==================================================
+
+--- FILE: prj.conf ---
+
+CONFIG_GPIO=y
+
+==================================================
+
+--- FILE: west.yml ---
+
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v3.6.0
+      import: true
+  self:
+    path: inklab-firmware
+
+==================================================
+
+--- FILE: boards\inklab_v1.overlay ---
+
+/ {
+    aliases {
+        /* Links the code alias "led0" to our custom hardware node below */
+        led0 = &my_rgb_red;
+    };
+
+    leds {
+        compatible = "gpio-leds";
+        my_rgb_red: led_red {
+            /* GPIOC, Pin 15. ACTIVE_LOW handles the Common Anode inversion automatically! */
+            gpios = <&gpioc 15 GPIO_ACTIVE_LOW>;
+            label = "RGB LED 0 (Red)";
+        };
+    };
+};
+
+==================================================
+
+--- FILE: src\main.c ---
+
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+
+/* Ask the device tree for the pin details of "led0" */
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+
+int main(void) {
+    /* Verify the GPIO hardware is ready */
+    if (!gpio_is_ready_dt(&led)) {
+        return 0;
+    }
+
+    /* Configure PC15 as an output. Because of ACTIVE_LOW in the overlay,
+       setting it to "ACTIVE" will pull the physical pin to 0V and turn the LED ON. */
+    gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
+
+    while (1) {
+        gpio_pin_toggle_dt(&led);
+        k_msleep(500); /* RTOS safe delay: 500ms */
+    }
+}
+
+==================================================
+

@@ -1,0 +1,1 @@
+"mcuboot":"C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/bootloader/mcuboot":"C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/bootloader/mcuboot/boot/zephyr/sysbuild"

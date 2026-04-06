@@ -1,0 +1,15 @@
+/ {
+    aliases {
+        /* Links the code alias "led0" to our custom hardware node below */
+        led0 = &my_rgb_red;
+    };
+
+    leds {
+        compatible = "gpio-leds";
+        my_rgb_red: led_red {
+            /* GPIOC, Pin 15. ACTIVE_LOW handles the Common Anode inversion automatically! */
+            gpios = <&gpioc 15 GPIO_ACTIVE_LOW>;
+            label = "RGB LED 0 (Red)";
+        };
+    };
+};

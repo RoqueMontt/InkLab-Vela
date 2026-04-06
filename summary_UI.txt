@@ -1,4 +1,6 @@
-- src -> App.vue
+=== FULL UI CODEBASE SUMMARY ===
+
+- App.vue
 
 <script setup>
 import { ref, watch, onMounted } from 'vue'
@@ -294,7 +296,7 @@ onMounted(() => {
 
 ==================================================
 
-- src -> main.js
+- main.js
 
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
@@ -307,7 +309,7 @@ app.mount('#app')
 
 ==================================================
 
-- src -> components -> CustomSelect.vue
+- components\CustomSelect.vue
 
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue'
@@ -418,7 +420,7 @@ const selectOption = (val) => {
 
 ==================================================
 
-- src -> components -> DiagnosticModal.vue
+- components\DiagnosticModal.vue
 
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
@@ -813,7 +815,7 @@ onUnmounted(() => {
 
 ==================================================
 
-- src -> components -> Header.vue
+- components\Header.vue
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
@@ -1141,7 +1143,7 @@ header {
 
 ==================================================
 
-- src -> components -> SidebarLog.vue
+- components\SidebarLog.vue
 
 <script setup>
 import { ref, watch, nextTick, computed, onMounted } from 'vue'
@@ -1341,7 +1343,7 @@ watch(() => store.logs.length, async () => {
 
 ==================================================
 
-- src -> components -> views -> AlgorithmDashboard.vue
+- components\views\AlgorithmDashboard.vue
 
 <template>
   <div class="algo-page">
@@ -1382,7 +1384,7 @@ watch(() => store.logs.length, async () => {
 
 ==================================================
 
-- src -> components -> views -> AutomationBench.vue
+- components\views\AutomationBench.vue
 
 <script setup>
 import { ref } from 'vue'
@@ -1706,7 +1708,7 @@ const runCapacitanceSweep = async () => {
 
 ==================================================
 
-- src -> components -> views -> FpgaConfig.vue
+- components\views\FpgaConfig.vue
 
 <script setup>
 import { ref, computed, onMounted, onActivated, watch } from 'vue'
@@ -2287,7 +2289,7 @@ button { border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s
 
 ==================================================
 
-- src -> components -> views -> SwTerminal.vue
+- components\views\SwTerminal.vue
 
 <script setup>
 import { ref, watch, nextTick, onMounted, onActivated, onUnmounted, computed } from 'vue'
@@ -2756,7 +2758,7 @@ input[type="text"]:disabled { opacity: 0.5; cursor: not-allowed; }
 
 ==================================================
 
-- src -> composables -> useSerial.js
+- composables\useSerial.js
 
 import { ref } from 'vue'
 import { useSystemStore } from '../stores/systemStore'
@@ -3019,7 +3021,7 @@ async function sendCommand(cmd, ending = '\n') {
 
 ==================================================
 
-- src -> stores -> systemStore.js
+- stores\systemStore.js
 
 import { defineStore } from 'pinia'
 

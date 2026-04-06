@@ -1,4 +1,6 @@
-- Core -> Inc -> bq25798.h
+=== LEGACY SELECTIVE SUMMARY ===
+
+--- FILE: Core\Inc\bq25798.h ---
 
 /**
  * @file bq25798.h
@@ -100,7 +102,7 @@ void BQ25798_SetEMA(float coeff);
 
 ==================================================
 
-- Core -> Inc -> fpga.h
+--- FILE: Core\Inc\fpga.h ---
 
 /**
  * @file    fpga.h
@@ -139,7 +141,7 @@ void FPGA_PowerDown(void);
 
 ==================================================
 
-- Core -> Inc -> powerMonitor.h
+--- FILE: Core\Inc\powerMonitor.h ---
 
 /**
  * @file powerMonitor.h
@@ -206,7 +208,7 @@ void PowerMonitor_SetOffset(PowerMonitor_t *dev, float offset_mA);
 
 ==================================================
 
-- Core -> Src -> app_freertos.c
+--- FILE: Core\Src\app_freertos.c ---
 
 /* USER CODE BEGIN Header */
 /**
@@ -941,7 +943,7 @@ void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
 
 ==================================================
 
-- Core -> Src -> battery_soc.c
+--- FILE: Core\Src\battery_soc.c ---
 
 #include "battery_soc.h"
 #include <math.h>
@@ -1019,7 +1021,7 @@ void BatterySOC_Update(float vbat_V, float current_mA, float* out_soc, float* ou
 
 ==================================================
 
-- Core -> Src -> bq25798.c
+--- FILE: Core\Src\bq25798.c ---
 
 /**
  * @file bq25798.c
@@ -1481,7 +1483,7 @@ void BQ25798_SetEMA(float coeff) {
 
 ==================================================
 
-- Core -> Src -> diagnostics.c
+--- FILE: Core\Src\diagnostics.c ---
 
 #include "diagnostics.h"
 #include "main.h"
@@ -1721,7 +1723,7 @@ void Diag_RunUSBReadTest(void) {
 
 ==================================================
 
-- Core -> Src -> fpga.c
+--- FILE: Core\Src\fpga.c ---
 
 /**
  * @file    fpga.c
@@ -1872,7 +1874,7 @@ void FPGA_PowerDown(void) {
 
 ==================================================
 
-- Core -> Src -> frontend_api.c
+--- FILE: Core\Src\frontend_api.c ---
 
 // ============================================================================
 // INCLUDES
@@ -2691,7 +2693,7 @@ void Frontend_CheckTimeout(void) {
 
 ==================================================
 
-- Core -> Src -> joystick.c
+--- FILE: Core\Src\joystick.c ---
 
 #include "joystick.h"
 #include "main.h"
@@ -2748,7 +2750,7 @@ JoyAction_t Joystick_Process(void) {
 
 ==================================================
 
-- Core -> Src -> led_manager.c
+--- FILE: Core\Src\led_manager.c ---
 
 #include "led_manager.h"
 #include "main.h"
@@ -2823,7 +2825,7 @@ void LED_GetStatus(uint8_t* r, uint8_t* g, uint8_t* b, bool* muted) {
 
 ==================================================
 
-- Core -> Src -> main.c
+--- FILE: Core\Src\main.c ---
 
 /* USER CODE BEGIN Header */
 /**
@@ -3806,7 +3808,7 @@ void assert_failed(uint8_t *file, uint32_t line)
 
 ==================================================
 
-- Core -> Src -> ota.c
+--- FILE: Core\Src\ota.c ---
 
 #include "main.h"
 #include "ff.h"
@@ -3938,7 +3940,7 @@ HAL_StatusTypeDef OTA_Update_From_SD(const char* filename) {
 
 ==================================================
 
-- Core -> Src -> pinmux.c
+--- FILE: Core\Src\pinmux.c ---
 
 #include "pinmux.h"
 #include "app_fatfs.h"
@@ -4479,7 +4481,7 @@ void EXT_I2C_Scanner(uint8_t bus_num) {
 
 ==================================================
 
-- Core -> Src -> powerMonitor.c
+--- FILE: Core\Src\powerMonitor.c ---
 
 /**
  * @file powerMonitor.c
@@ -4681,7 +4683,89 @@ void PowerMonitor_SetOffset(PowerMonitor_t *dev, float offset_mA) {
 
 ==================================================
 
-- Core -> Src -> user_diskio_spi.c
+--- FILE: Core\Src\sys_power.c ---
+
+#include "sys_power.h"
+#include "main.h"
+#include "bq25798.h"
+#include "powerMonitor.h"
+#include "led_manager.h"
+#include "cmsis_os.h"
+#include <stdio.h>
+#include <string.h>
+
+extern TIM_HandleTypeDef htim6;
+extern PowerMonitor_t ina_1v2_core, ina_3v3_ext, ina_3v3_fpga, ina_3v3_stm32;
+
+static bool is_sleeping = false;
+
+extern void USB_Printf(const char *format, ...);
+
+static void Enter_Low_Power_Clock(void) {
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_SYSCLK;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI; // 16MHz
+    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0);
+    __HAL_RCC_PLL_DISABLE();
+}
+
+static void Exit_Low_Power_Clock(void) {
+    __HAL_RCC_PLL_ENABLE();
+    while(__HAL_RCC_GET_FLAG(RCC_FLAG_PLLRDY) == RESET) {}
+
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_SYSCLK;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK; // 64MHz
+    HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2);
+}
+
+bool SysPower_IsSleeping(void) {
+    return is_sleeping;
+}
+
+void SysPower_EnterSleep(void) {
+    if (is_sleeping) return;
+    is_sleeping = true;
+
+    LED_SetMute(true);
+    BQ25798_SetPFM_FWD(1);
+    HAL_TIM_Base_Stop_IT(&htim6);
+
+    // Shut down external INA sensors to save power
+    PowerMonitor_SetSleep(&ina_1v2_core, 1);
+    PowerMonitor_SetSleep(&ina_3v3_ext, 1);
+    PowerMonitor_SetSleep(&ina_3v3_fpga, 1);
+    PowerMonitor_SetSleep(&ina_3v3_stm32, 1);
+
+    Enter_Low_Power_Clock();
+    USB_Printf("LOG: Entering Deep Sleep (16MHz)\n");
+}
+
+void SysPower_Wake(void) {
+    if (!is_sleeping) return;
+
+    Exit_Low_Power_Clock();
+    osDelay(10); // Stabilize clocks
+
+    is_sleeping = false;
+    LED_SetMute(false);
+    BQ25798_SetPFM_FWD(0);
+    osDelay(50); // Let rails stabilize
+
+    HAL_TIM_Base_Start_IT(&htim6);
+
+    PowerMonitor_SetSleep(&ina_1v2_core, 0);
+    PowerMonitor_SetSleep(&ina_3v3_ext, 0);
+    PowerMonitor_SetSleep(&ina_3v3_fpga, 0);
+    PowerMonitor_SetSleep(&ina_3v3_stm32, 0);
+
+    USB_Printf("LOG: System Awake. Restored nominal 64MHz timing.\n");
+}
+
+
+==================================================
+
+--- FILE: Core\Src\user_diskio_spi.c ---
 
 #include "stm32g0xx_hal.h"
 #include "user_diskio_spi.h"
@@ -5161,7 +5245,7 @@ void USER_SPI_ResetStatus(void) {
 
 ==================================================
 
-- FATFS -> Target -> user_diskio.c
+--- FILE: FATFS\Target\user_diskio.c ---
 
 /* USER CODE BEGIN Header */
 /**

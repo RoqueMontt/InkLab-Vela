@@ -1,0 +1,32 @@
+empty_file.o: \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/misc/empty_file.c \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/boards/arm/nucleo_g0b1re/nucleo_g0b1re.dts \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/arm/st/g0/stm32g0b1Xe.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/common/mem.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/arm/st/g0/stm32g0b1.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/arm/st/g0/stm32g071.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/arm/st/g0/stm32g051.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/arm/st/g0/stm32g031.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/arm/st/g0/stm32g030.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/arm/st/g0/stm32g0.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/arm/armv6-m.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/common/skeleton.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/clock/stm32g0_clock.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/clock/stm32_common_clocks.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/gpio/gpio.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/i2c/i2c.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/pwm/pwm.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/dma/stm32_dma.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/adc/adc.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/adc/stm32l4_adc.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/adc/stm32_adc.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/pwm/stm32_pwm.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/reset/stm32g0_reset.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/reset/stm32-common.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/dts/common/freq.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/modules/hal/stm32/dts/st/g0/stm32g0b1r(b-c-e)tx-pinctrl.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/pinctrl/stm32-pinctrl.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/pinctrl/stm32-pinctrl-common.h \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/boards/arm/nucleo_g0b1re/arduino_r3_connector.dtsi \
+ C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/zephyr/include/zephyr/dt-bindings/input/input-event-codes.h \
+ boards/inklab_v1.overlay
