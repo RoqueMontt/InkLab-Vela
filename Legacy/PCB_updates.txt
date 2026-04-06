@@ -1,0 +1,90 @@
+================================================================
+PROJECT: PCB REVISION UPDATES
+================================================================
+
+--- SUMMARY OF MAJOR ARCHITECTURE CHANGES ---
+* Power Monitoring: Upgrade to 1x INA4235 
+* Regulation: Upgrade to TPSM8282x for 3.3V/1.2V rails (replaces TLV76701).
+* Battery MGMT: Add thermistor and external BAT MOSFET to BQ25798.
+* Protection: Global fuse increase to 1A (lower DCR); Remove 5V input fuse.
+
+--- [1] SCHEMATIC & COMPONENT TWEAKS ---
+[ ] CAPS: Verify MPNs for 4.7uF/25V and 2.2uF/50V.
+[ ] CAPS: Add 10uF bulk to uSD VDD.
+[ ] CAPS: Add 1x 4.7uF bulk to 3.3V MCU and 1.2V FPGA core.
+[ ] CAPS: Add 1x 2.2uF to each BQ25798 rail.
+[ ] ICs: Verify TPS65 MPN and package footprint.
+[ ] INDUCTORS: Verify MPN of 2.2uH inductors.
+[ ] PULL-UPS: Decrease I2C resistors to 2.2k.
+[ ] DEBOUNCE: Add RC network for the physical switch.
+[ ] SHUNTS: 
+    - 1.2V Rail: Use 1.5 ohm (or 2x 1 ohm in series).
+    - 3.3V FPGA/MCU: 1 ohm.
+    - 3.3V EXT: Modify to 0.5 ohm (use parallel/series combo).
+
+--- [2] POWER INDICATOR LOGIC (RED LED) ---
+* Goal: Eliminate battery drain; active only via USB.
+* Action: Connect Anode to VBUS.
+* Logic: Power from TPS7A88 PG (Power Good) pins.
+* Resistors: Recalculate series resistance for 1/3 current of current setup.
+
+--- [3] PCB LAYOUT & MECHANICAL ---
+[ ] USB-C: Move to bottom of board; shift "inward" for better manufacturability.
+[ ] uSD: Shift holder "up" for enclosure alignment; ground the chassis.
+[ ] STACKING: Increase board area by 3mm so display sits flat.
+[ ] WIDTH: Add 0.5mm - 1.0mm extra width per side for better silkscreen legibility.
+[ ] SILKSCREEN: 
+    - Correct pinout labels.
+    - Add Version Control identifier.
+    - Move "Inklab" name/logo and "OSHlab" logo to the top.
+[ ] CONNECTORS: Remove top battery connector and VBAT header fuse.
+[ ] LED DRIVER: Replace discrete LED resistors with 1x LP5814/5 (I2C controlled).
+
+--- [4] LAB TESTING & FIRMWARE VALIDATION ---
+* BQ25798 Recovery: Verify if new code fixed the 25ms backup recovery delay.
+* Power Optimization: BQ DC-DC consumes 150mW; ensure firmware deactivates it when idle.
+
+================================================================
+END OF NOTES
+
+
+
+
+--- [1] SCHEMATIC & COMPONENT TWEAKS ---
+[ ] I2C BUS (1.8V): Create a dedicated 1.8V ultra-low-power I2C bus for the MAX30102 (strictly 1.8V logic), LSM6DSO, and SHT4x.
+[ ] I2C BUS (3.3V): Route the MLX90632 on a separate 3.3V MCU bus OR use a bidirectional logic level shifter (e.g., PCA9306) to bridge it to the 1.8V bus.
+[ ] INTERRUPTS: Connect the hardware FIFO INT (Interrupt) pins from the LSM6DSO and MAX30102 directly to the MCU's EXTI wake-up pins.
+[ ] PULL-UPS: Recalculate I2C pull-up resistors for the 1.8V bus (e.g., 2.2kΩ vs 4.7kΩ) to balance rise-time requirements with the new lower voltage.
+[ ] VOLTAGE REGULATION: Ensure the PMIC/LDO architecture can supply a clean, dedicated 1.8V rail for the sensors and I2C pull-ups.
+
+--- [2] PCB LAYOUT & ROUTING ---
+[ ] TRACE WIDTH: Reduce digital logic traces from 0.20mm down to your manufacturer's reliable minimum (e.g., 0.12mm - 0.15mm) to lower the baseline parallel-plate capacitance to ground.
+[ ] EPD ROUTING: Delete all serpentine length-matching traces on the e-ink lines. Route them as straight and directly as possible to reduce total trace length.
+[ ] TRACE SPACING: Apply the "3W Rule" (spacing between traces = 3x the trace width) for parallel single-ended buses to minimize mutual capacitance and crosstalk.
+[ ] ESD PROTECTION: Maintain the ESD224 chips at the connectors, but ensure there is no through-routing for the data channels  (do not draw traces directly through the component pads; use short stubs to the pads instead).
+
+--- [3] CONNECTOR & PINOUT OPTIMIZATION ---
+[ ] EXT CONNECTOR: Reorder pins to isolate high-speed aggressors (SPI SCK, MOSI, MISO) from each other.
+[ ] EXT CONNECTOR: Interleave GND pins as electromagnetic shields (e.g., GND - MOSI - GND - SCK - MISO - GND).
+[ ] EXT CONNECTOR: Group slow or static control pins (CS, DC, RST) together, as they rarely toggle and will not induce crosstalk.
+[ ] EPD HEADER: Apply the exact same GND-interleaving strategy to the fast SPI lines driving the e-ink display.
+
+--- [4] FIRMWARE & LAB TESTING ---
+
+Hardware FIFOs: Rewrite MCU firmware to remain in deep sleep while the MAX30102 and LSM6DSO gather data autonomously, waking only when their buffers are full.
+
+Crosstalk Validation: Re-run the Odd-Mode vs. Even-Mode JS capacitance sweep on the Rev 2 board to quantify the physical improvements of the 3W spacing rule.
+
+I2C Power Profiling: Use the INA monitors to validate the expected ~70% drop in active I2C power consumption on the 1.8V bus.
+
+================================================================
+END OF NOTES
+
+
+[ ] PULL-UPS 2: Remove the pull ups of the ext i2c pins
+add basic sensors on the now free space of the pcb (where the battery connector was), mainly a temp and humidity sensor, an imu and a tof
+add power switches to the 3.3 rails of the fpga, the sd card and the ext connector (TPS22995RZGR)
+add mcu - 22 resistor - esd chips
+increase anti via
+increase anti pad for connectors
+reduce to 0.13mm traces overall

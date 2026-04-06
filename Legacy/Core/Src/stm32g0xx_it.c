@@ -1,0 +1,250 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file    stm32g0xx_it.c
+  * @brief   Interrupt Service Routines.
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "stm32g0xx_it.h"
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN TD */
+
+/* USER CODE END TD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN PV */
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/* USER CODE END 0 */
+
+/* External variables --------------------------------------------------------*/
+extern PCD_HandleTypeDef hpcd_USB_DRD_FS;
+extern DAC_HandleTypeDef hdac1;
+extern DMA_HandleTypeDef hdma_i2c1_rx;
+extern DMA_HandleTypeDef hdma_i2c1_tx;
+extern I2C_HandleTypeDef hi2c1;
+extern DMA_HandleTypeDef hdma_spi2_rx;
+extern DMA_HandleTypeDef hdma_spi2_tx;
+extern DMA_HandleTypeDef hdma_spi3_rx;
+extern DMA_HandleTypeDef hdma_spi3_tx;
+extern SPI_HandleTypeDef hspi2;
+extern SPI_HandleTypeDef hspi3;
+extern TIM_HandleTypeDef htim6;
+extern TIM_HandleTypeDef htim7;
+
+/* USER CODE BEGIN EV */
+
+/* USER CODE END EV */
+
+/******************************************************************************/
+/*           Cortex-M0+ Processor Interruption and Exception Handlers          */
+/******************************************************************************/
+/**
+  * @brief This function handles Non maskable interrupt.
+  */
+void NMI_Handler(void)
+{
+  /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
+
+  /* USER CODE END NonMaskableInt_IRQn 0 */
+  /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
+   while (1)
+  {
+  }
+  /* USER CODE END NonMaskableInt_IRQn 1 */
+}
+
+/**
+  * @brief This function handles Hard fault interrupt.
+  */
+void HardFault_Handler(void)
+{
+  /* USER CODE BEGIN HardFault_IRQn 0 */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_RCC_RTCAPB_CLK_ENABLE();
+  HAL_PWR_EnableBkUpAccess();
+
+  // If we crash immediately after an OTA update, trigger a software
+  // reset so main.c can catch it and rollback the memory bank!
+  if (TAMP->BKP0R == 0x4F544150) {
+      NVIC_SystemReset();
+  }
+  /* USER CODE END HardFault_IRQn 0 */
+  while (1)
+  {
+    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
+    /* USER CODE END W1_HardFault_IRQn 0 */
+  }
+}
+
+/******************************************************************************/
+/* STM32G0xx Peripheral Interrupt Handlers                                    */
+/* Add here the Interrupt Handlers for the used peripherals.                  */
+/* For the available peripheral interrupt handler names,                      */
+/* please refer to the startup file (startup_stm32g0xx.s).                    */
+/******************************************************************************/
+
+/**
+  * @brief This function handles USB, UCPD1 and UCPD2 global interrupts.
+  */
+void USB_UCPD1_2_IRQHandler(void)
+{
+  /* USER CODE BEGIN USB_UCPD1_2_IRQn 0 */
+
+  /* USER CODE END USB_UCPD1_2_IRQn 0 */
+  HAL_PCD_IRQHandler(&hpcd_USB_DRD_FS);
+  /* USER CODE BEGIN USB_UCPD1_2_IRQn 1 */
+
+  /* USER CODE END USB_UCPD1_2_IRQn 1 */
+}
+
+/**
+  * @brief This function handles DMA1 channel 1 interrupt.
+  */
+void DMA1_Channel1_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
+
+  /* USER CODE END DMA1_Channel1_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_spi2_rx);
+  /* USER CODE BEGIN DMA1_Channel1_IRQn 1 */
+
+  /* USER CODE END DMA1_Channel1_IRQn 1 */
+}
+
+/**
+  * @brief This function handles DMA1 channel 2 and channel 3 interrupts.
+  */
+void DMA1_Channel2_3_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Channel2_3_IRQn 0 */
+
+  /* USER CODE END DMA1_Channel2_3_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_spi2_tx);
+  HAL_DMA_IRQHandler(&hdma_spi3_rx);
+  /* USER CODE BEGIN DMA1_Channel2_3_IRQn 1 */
+
+  /* USER CODE END DMA1_Channel2_3_IRQn 1 */
+}
+
+/**
+  * @brief This function handles DMA1 Ch4 to Ch7, DMA2 Ch1 to Ch5 and DMAMUX1 Overrun Interrupts.
+  */
+void DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn 0 */
+
+  /* USER CODE END DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_spi3_tx);
+  HAL_DMA_IRQHandler(&hdma_i2c1_rx);
+  HAL_DMA_IRQHandler(&hdma_i2c1_tx);
+  /* USER CODE BEGIN DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn 1 */
+
+  /* USER CODE END DMA1_Ch4_7_DMA2_Ch1_5_DMAMUX1_OVR_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM6, DAC and LPTIM1 global Interrupts.
+  */
+void TIM6_DAC_LPTIM1_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM6_DAC_LPTIM1_IRQn 0 */
+
+  /* USER CODE END TIM6_DAC_LPTIM1_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim6);
+  HAL_DAC_IRQHandler(&hdac1);
+  /* USER CODE BEGIN TIM6_DAC_LPTIM1_IRQn 1 */
+
+  /* USER CODE END TIM6_DAC_LPTIM1_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM7 and LPTIM2 global Interrupt.
+  */
+void TIM7_LPTIM2_IRQHandler(void)
+{
+  /* USER CODE BEGIN TIM7_LPTIM2_IRQn 0 */
+
+  /* USER CODE END TIM7_LPTIM2_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim7);
+  /* USER CODE BEGIN TIM7_LPTIM2_IRQn 1 */
+
+  /* USER CODE END TIM7_LPTIM2_IRQn 1 */
+}
+
+/**
+  * @brief This function handles I2C1 event global interrupt / I2C1 wake-up interrupt through EXTI line 23.
+  */
+void I2C1_IRQHandler(void)
+{
+  /* USER CODE BEGIN I2C1_IRQn 0 */
+
+  /* USER CODE END I2C1_IRQn 0 */
+  if (hi2c1.Instance->ISR & (I2C_FLAG_BERR | I2C_FLAG_ARLO | I2C_FLAG_OVR))
+  {
+    HAL_I2C_ER_IRQHandler(&hi2c1);
+  }
+  else
+  {
+    HAL_I2C_EV_IRQHandler(&hi2c1);
+  }
+  /* USER CODE BEGIN I2C1_IRQn 1 */
+
+  /* USER CODE END I2C1_IRQn 1 */
+}
+
+/**
+  * @brief This function handles SPI2/I2S2, SPI3/I2S3 Interrupt.
+  */
+void SPI2_3_IRQHandler(void)
+{
+  /* USER CODE BEGIN SPI2_3_IRQn 0 */
+
+  /* USER CODE END SPI2_3_IRQn 0 */
+  HAL_SPI_IRQHandler(&hspi2);
+  HAL_SPI_IRQHandler(&hspi3);
+  /* USER CODE BEGIN SPI2_3_IRQn 1 */
+
+  /* USER CODE END SPI2_3_IRQn 1 */
+}
+
+/* USER CODE BEGIN 1 */
+
+/* USER CODE END 1 */

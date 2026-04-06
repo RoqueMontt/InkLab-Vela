@@ -1,0 +1,3390 @@
+- src -> App.vue
+
+<script setup>
+import { ref, watch, onMounted } from 'vue'
+import AppHeader from './components/Header.vue'
+import SidebarLog from './components/SidebarLog.vue'
+import FpgaConfig from './components/views/FpgaConfig.vue'
+import PowerDashboard from './components/views/PowerDashboard.vue'
+import DiagnosticModal from './components/DiagnosticModal.vue'
+import SwTerminal from './components/views/SwTerminal.vue'
+import JoystickView from './components/views/JoystickView.vue'
+import SpiTester from './components/views/SpiTester.vue'
+import { useSerial } from './composables/useSerial'
+import { useSystemStore } from './stores/systemStore'
+import AlgorithmDashboard from './components/views/AlgorithmDashboard.vue'
+import PatientProfile from './components/views/PatientProfile.vue'
+import PinoutConfig from './components/views/PinoutConfig.vue' 
+import AutomationBench from './components/views/AutomationBench.vue'
+import SignalGenerator from './components/views/SignalGenerator.vue'
+
+
+
+const { attemptAutoConnect, sendCommand } = useSerial()
+const store = useSystemStore()
+
+const powerDownAndDismiss = () => {
+  sendCommand('BQ:BACKUP:0')
+  setTimeout(() => { sendCommand('BQ:OTG:0') }, 20)
+  setTimeout(() => { sendCommand('BQ:DIS_IN:1') }, 40)
+  setTimeout(() => { sendCommand('BQ:SHIP:2') }, 150)
+  store.showSdWarning = false
+  store.sdWarningDismissed = true
+}
+
+const ignoreWarning = () => {
+  store.showSdWarning = false
+  store.sdWarningDismissed = true
+}
+
+// Add our combined component 
+const tabs = { FpgaConfig, PowerDashboard, JoystickView, PinoutConfig, SwTerminal, SpiTester, AlgorithmDashboard, PatientProfile, AutomationBench, SignalGenerator }
+// 1. Create a memory object for the default starting tabs of each mode
+const tabHistory = ref({
+  CONFIG: 'FpgaConfig',
+  DEBUG: 'SwTerminal',
+  APP: 'AlgorithmDashboard'
+})
+
+// 2. Initialize the active tab based on the current mode
+const activeTab = ref(tabHistory.value[store.appMode])
+
+// 3. Whenever the user clicks a new tab, save it to the current mode's history
+watch(activeTab, (newTab) => {
+  tabHistory.value[store.appMode] = newTab
+})
+
+// 4. Whenever the mode changes, restore the saved tab from history
+watch(() => store.appMode, (newMode) => {
+  if (tabHistory.value[newMode]) {
+    activeTab.value = tabHistory.value[newMode]
+  }
+})
+
+// Dismiss single toast
+const dismissToast = (id) => {
+  store.notifications = store.notifications.filter(n => n.id !== id)
+}
+
+
+
+onMounted(() => {
+  attemptAutoConnect()
+
+  window.addEventListener('keydown', (e) => {
+    
+    // Check if the user is holding the Alt key 
+    if (e.altKey) {
+      
+      // 1. App Mode Navigation (Alt + A / Alt + S)
+      const isModeLeft = e.code === 'KeyA';
+      const isModeRight = e.code === 'KeyS';
+
+      if (isModeLeft || isModeRight) {
+        e.preventDefault(); // Stop the browser from triggering default Alt menus
+        
+        const modes = ['CONFIG', 'DEBUG', 'APP'];
+        const currentModeIdx = modes.indexOf(store.appMode);
+        
+        if (isModeLeft) {
+          // Cycle backwards
+          store.appMode = modes[(currentModeIdx - 1 + modes.length) % modes.length];
+        } else if (isModeRight) {
+          // Cycle forwards
+          store.appMode = modes[(currentModeIdx + 1) % modes.length];
+        }
+        return; // Exit early
+      }
+
+      // 2. Tab Navigation (Alt + Q / Alt + W or Left/Right Arrows)
+      const isTabLeft = e.code === 'KeyQ' || e.code === 'ArrowLeft'; 
+      const isTabRight = e.code === 'KeyW' || e.code === 'ArrowRight';
+
+      if (isTabLeft || isTabRight) {
+        e.preventDefault(); // Stop the browser from triggering default Alt menus 
+
+        const tabArray = store.currentTabsArray;
+        const currentIndex = tabArray.indexOf(activeTab.value);
+
+        if (currentIndex !== -1) {
+          if (isTabLeft) {
+            activeTab.value = tabArray[(currentIndex - 1 + tabArray.length) % tabArray.length];
+          } else if (isTabRight) {
+            activeTab.value = tabArray[(currentIndex + 1) % tabArray.length];
+          }
+        }
+      }
+    }
+  })
+})
+</script>
+
+<template>
+  <div class="workspace">
+    <AppHeader v-model:activeTab="activeTab" />
+    
+    <!-- Apply 'full-width' class if in SW mode -->
+    <div class="main-layout" :class="{ 'full-width': store.appMode === 'APP' || activeTab === 'SwTerminal' }">
+      <div class="content-left">
+        <KeepAlive>
+          <component :is="tabs[activeTab]" />
+        </KeepAlive>
+      </div>
+      
+      <SidebarLog v-if="store.appMode !== 'APP' && activeTab !== 'SwTerminal'" />
+    </div>
+  </div>
+  
+    <DiagnosticModal v-if="store.showDiagnosticModal" />
+
+  <!-- SD Card Safety Modal -->
+    <div v-if="store.showSdWarning" class="modal-overlay">
+      <div class="modal-card">
+        <div class="modal-header">⚠️ Missing Storage Media</div>
+        <div class="modal-body">
+          <p>The MicroSD card is not detected. <b>Do NOT hot-plug the SD card while the system is live</b>, as the sudden inrush current will crash the 3.3V power rails.</p>
+          <p>Would you like to safely disconnect the input power before inserting the card?</p>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-warning" @click="powerDownAndDismiss">Power Down Inputs (Safe)</button>
+          <button class="btn-secondary" @click="ignoreWarning">Continue Without SD (Testing)</button>
+        </div>
+      </div>
+    </div>
+
+      <!-- NEW: Global Toast Notification Container -->
+  <div class="toast-container">
+    <div v-for="toast in store.notifications" :key="toast.id" class="toast-card" :class="toast.type">
+      <div class="toast-content">{{ toast.msg }}</div>
+      <button class="toast-close" @click="dismissToast(toast.id)">×</button>
+    </div>
+  </div>
+</template> 
+
+<style scoped>
+.workspace { 
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper); 
+}
+
+.main-layout { 
+  display: grid; 
+  grid-template-columns: 1fr 440px; 
+  flex-grow: 1; 
+  min-height: 0; 
+}
+
+/* Forces the left side to take up the whole screen when active */
+.main-layout.full-width {
+  grid-template-columns: 1fr;
+}
+
+.content-left { 
+  padding: 32px; 
+  overflow-y: auto;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+  min-width: 0; 
+  scrollbar-width: thin;
+}
+
+/* Modal Overlay Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; width: 100vw; height: 100vh;
+  background: rgba(15, 23, 42, 0.8);
+  backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+}
+.modal-card {
+  background: var(--paper);
+  width: 480px;
+  border-radius: 12px;
+  border: 1px solid var(--edge);
+  box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.modal-header {
+  background: #fffbeb;
+  color: #d97706;
+  padding: 16px 20px;
+  font-weight: 800;
+  font-size: 1.1rem;
+  border-bottom: 1px solid #fde68a;
+}
+.modal-body {
+  padding: 24px 20px;
+  font-size: 0.9rem;
+  color: var(--ink);
+  line-height: 1.6;
+}
+.modal-body p { margin-top: 0; margin-bottom: 12px; }
+.modal-body b { color: var(--error); }
+.modal-actions {
+  display: flex; gap: 12px;
+  padding: 16px 20px;
+  background: var(--ghost);
+  border-top: 1px solid var(--edge);
+  justify-content: flex-end;
+}
+.btn-warning { background: var(--error); color: white; border: none; font-size: 0.85rem;}
+.btn-secondary { background: var(--edge); color: var(--ink); font-size: 0.85rem;}
+
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  z-index: 10000;
+  pointer-events: none; /* Let clicks pass through gaps */
+}
+
+.toast-card {
+  pointer-events: auto;
+  min-width: 300px;
+  max-width: 400px;
+  background: var(--paper);
+  border: 1px solid var(--edge);
+  border-left: 6px solid var(--info);
+  border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  animation: slideIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.toast-card.error { border-left-color: var(--error); background: #fef2f2; }
+.toast-card.success { border-left-color: var(--success); }
+.toast-card.warning { border-left-color: var(--warning); }
+
+.toast-content {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.4;
+}
+
+.toast-close {
+  background: transparent;
+  border: none;
+  font-size: 1.5rem;
+  line-height: 1;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 0 0 0 12px;
+}
+.toast-close:hover { color: var(--ink); }
+
+@keyframes slideIn {
+  from { transform: translateX(120%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+</style>
+
+==================================================
+
+- src -> main.js
+
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import App from './App.vue'
+import './assets/main.css'
+
+const app = createApp(App)
+app.use(createPinia())
+app.mount('#app')
+
+==================================================
+
+- src -> components -> CustomSelect.vue
+
+<script setup>
+import { ref, onMounted, onUnmounted, computed } from 'vue'
+
+const props = defineProps({
+  modelValue: { required: true },
+  options: { type: Array, required: true }, // Array of { value: Any, label: String }
+  disabled: { type: Boolean, default: false },
+  placeholder: { type: String, default: 'Select...' },
+  size: { type: String, default: 'normal' } // 'normal' | 'small'
+})
+
+const emit = defineEmits(['update:modelValue', 'change'])
+
+const isOpen = ref(false)
+const wrapperRef = ref(null)
+
+// Close dropdown when clicking outside
+const closeDropdown = (e) => {
+  if (isOpen.value && wrapperRef.value && !wrapperRef.value.contains(e.target)) {
+    isOpen.value = false
+  }
+}
+
+onMounted(() => document.addEventListener('click', closeDropdown))
+onUnmounted(() => document.removeEventListener('click', closeDropdown))
+
+const selectedLabel = computed(() => {
+  const opt = props.options.find(o => o.value === props.modelValue)
+  return opt ? opt.label : props.placeholder
+})
+
+const selectOption = (val) => {
+  emit('update:modelValue', val)
+  emit('change', val)
+  isOpen.value = false
+}
+</script>
+
+<template>
+  <div class="custom-select-wrapper" ref="wrapperRef" :class="size">
+    <button 
+      type="button"
+      class="custom-select-btn" 
+      @click="isOpen = !isOpen" 
+      :disabled="disabled"
+      :class="{ 'is-open': isOpen }"
+    >
+      <span class="val-text">{{ selectedLabel }}</span>
+      <span class="custom-caret">▼</span>
+    </button>
+    
+    <div v-if="isOpen" class="custom-options-menu">
+      <div 
+        v-for="opt in options" 
+        :key="opt.value"
+        class="custom-option"
+        :class="{ selected: modelValue === opt.value }"
+        @click="selectOption(opt.value)"
+      >
+        {{ opt.label }}
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.custom-select-wrapper { position: relative; width: 100%; }
+
+.custom-select-btn {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  width: 100%; background: white; border: 1px solid var(--edge);
+  border-radius: 6px; font-family: inherit; color: var(--ink);
+  cursor: pointer; text-align: left; transition: 0.2s; outline: none;
+}
+.custom-select-btn:hover:not(:disabled) { background: #f8fafc; border-color: #cbd5e1; }
+.custom-select-btn:focus, .custom-select-btn.is-open { border-color: var(--info); box-shadow: 0 0 0 2px rgba(59,130,246,0.1); background: white; }
+.custom-select-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Sizing Variants */
+.normal .custom-select-btn { padding: 10px 12px; font-size: 0.9rem; font-weight: 600; height: 42px; }
+.small .custom-select-btn { padding: 4px 10px; font-size: 0.75rem; font-weight: 600; height: 28px; background: var(--ghost); }
+.small .custom-select-btn:hover:not(:disabled) { background: #e2e8f0; }
+
+.val-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-grow: 1; }
+.custom-caret { font-size: 0.6rem; color: #94a3b8; transition: transform 0.2s; flex-shrink: 0; }
+.is-open .custom-caret { transform: rotate(180deg); color: var(--info); }
+
+.custom-options-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; min-width: 100%;
+  background: var(--paper); border: 1px solid var(--edge);
+  border-radius: 6px; box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+  z-index: 1000; overflow-y: auto; max-height: 250px;
+  display: flex; flex-direction: column;
+}
+.small .custom-options-menu { min-width: 160px; }
+
+.custom-option {
+  padding: 10px 12px; font-size: 0.85rem; font-weight: 500;
+  color: var(--ink); cursor: pointer; transition: background 0.1s, color 0.1s;
+  white-space: nowrap; text-overflow: ellipsis;
+}
+.small .custom-option { padding: 8px 10px; font-size: 0.75rem; }
+
+.custom-option:hover { background: var(--ghost); color: var(--info); }
+.custom-option.selected { background: #eff6ff; color: var(--info); font-weight: 700; }
+</style>
+
+==================================================
+
+- src -> components -> DiagnosticModal.vue
+
+<script setup>
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { useSystemStore } from '../stores/systemStore'
+import { useSerial } from '../composables/useSerial'
+
+const store = useSystemStore()
+const { sendCommand, startUpload } = useSerial() 
+
+const isRunning = ref(false)
+const currentPhase = ref('Ready')
+const promptMessage = ref('Click "Start Diagnostics" to begin the hardware verification suite.')
+const requiresUserAction = ref(false)
+const userResponse = ref(null)
+const testResults = ref([])
+
+const resultsListRef = ref(null)
+
+const delay = (ms) => new Promise(res => setTimeout(res, ms))
+
+const addResult = (name, pass, detail) => {
+  testResults.value.push({ name, pass, detail })
+  store.addLog(`DIAG:[${pass ? 'PASS' : 'FAIL'}] ${name} - ${detail}`, pass ? 'var(--success)' : 'var(--error)')
+  
+  nextTick(() => {
+    if (resultsListRef.value) {
+      resultsListRef.value.scrollTop = resultsListRef.value.scrollHeight
+    }
+  })
+}
+
+const checkRange = (name, val, min, max, unit) => {
+  const v = parseFloat(val)
+  const pass = (v >= min && v <= max)
+  addResult(name, pass, `${v.toFixed(2)} ${unit} (Expected: ${min}-${max})`)
+  return pass
+}
+
+const waitForUser = async (msg) => {
+  promptMessage.value = msg
+  requiresUserAction.value = true
+  userResponse.value = null
+  store.addLog(`DIAG PROMPT: ${msg}`, 'var(--warning)')
+  
+  return new Promise((resolve) => {
+    const unwatch = watch(userResponse, (val) => {
+      if (val !== null) {
+        requiresUserAction.value = false
+        unwatch()
+        resolve(val)
+      }
+    })
+  })
+}
+
+const runSDSequence = () => {
+  return new Promise(async (resolve) => {
+    store.sdData = { status: 'RUNNING', capacity: '--', free: '--', health: '--', fatWrite: '--', fatRead: '--', usbUplink: '--', usbDownlink: '--' }
+    
+    await sendCommand('SD_TEST')
+
+    const unwatch = watch(() => store.diagSequence.count, async () => {
+      const lastLog = store.diagSequence.text.trim()
+
+      if (lastLog === '--- DIAGNOSTICS END ---' && store.sdData.status === 'RUNNING') {
+        setTimeout(async () => await sendCommand('RAW_TEST'), 250)
+      } 
+      else if (lastLog === '=================' && store.sdData.status === 'RUNNING') {
+        setTimeout(async () => await sendCommand('READ_TEST'), 250)
+      } 
+      else if (lastLog === '==============================' && store.sdData.status === 'RUNNING') {
+        store.sdData.status = 'DOWNLINKING'
+        const dummyFile = new Uint8Array(1024 * 1024).fill(0xAA)
+        setTimeout(() => { startUpload(dummyFile, 1, 1, 'Diag_Test') }, 250)
+      } 
+      else if (lastLog === 'Transfer complete.' && store.sdData.status === 'DOWNLINKING') {
+        store.sdData.usbDownlink = store.transferSpeed 
+        store.sdData.status = 'DONE'
+        unwatch()
+        resolve()
+      }
+    })
+  })
+}
+
+const startDiagnostics = async () => {
+  if (!store.isConnected) {
+    store.addLog("ERR: Connect hardware first.", "var(--error)")
+    return
+  }
+  
+  isRunning.value = true
+  testResults.value =[]
+  store.addLog(">>> Initiating Full System Diagnostic Factory Test...", "var(--info)")
+
+  // PHASE 1: Storage
+  currentPhase.value = 'Datapath & SD Card'
+  promptMessage.value = 'Running automated storage benchmarks...'
+  await runSDSequence()
+
+  checkRange('SD Raw Write', store.sdData.fatWrite, 680, 700, 'KB/s')
+  checkRange('SD Raw Read', store.sdData.fatRead, 800, 1090, 'KB/s')
+  checkRange('USB Uplink', store.sdData.usbUplink, 350, 400, 'KB/s')
+  checkRange('USB Downlink', store.sdData.usbDownlink, 200, 400, 'KB/s')
+
+  // PHASE 2: Joystick
+  currentPhase.value = 'Interactive IO: Joystick'
+  const joySteps =[
+    { name: 'UP', key: 'w' }, { name: 'DOWN', key: 's' },
+    { name: 'LEFT', key: 'a' }, { name: 'RIGHT', key: 'd' }, { name: 'CENTER (Press)', key: 'c' }
+  ]
+
+  for (const dir of joySteps) {
+    promptMessage.value = `Please push the joystick: ${dir.name}`
+    store.addLog(`DIAG PROMPT: Push joystick ${dir.name}`, 'var(--warning)')
+    
+    await new Promise((resolve) => {
+      const unwatch = watch(() => store.ioData, (io) => {
+        if (io[dir.key] === 0) {
+          unwatch()
+          resolve()
+        }
+      }, { deep: true })
+    })
+    addResult(`Joystick ${dir.name}`, true, 'Registered')
+  }
+
+  // PHASE 3: LED Sweep
+  currentPhase.value = 'Interactive IO: Indicators'
+
+  // NEW: Save the user's previous LED states
+  const prevR = store.ledState.r
+  const prevG = store.ledState.g
+  const prevB = store.ledState.b
+  const prevMuted = store.ledState.muted
+
+  store.ledState.muted = false
+  await sendCommand('LED:MUTE:0')
+  await sendCommand('LED:OVERRIDE:1') 
+
+  const colors =[
+    { name: 'RED', cmd: 'LED:PWM:VAL:0:0' },
+    { name: 'GREEN', cmd: 'LED:PWM:0:VAL:0' },
+    { name: 'BLUE', cmd: 'LED:PWM:0:0:VAL' }
+  ]
+
+  for (const c of colors) {
+    promptMessage.value = `Sweeping ${c.name} LED... Look at the board.`
+    await delay(1000)
+    store.addLog(`DIAG: Sweeping ${c.name} LED`, 'var(--info)')
+    
+    for (let i = 0; i <= 100; i += 5) {
+      await sendCommand(c.cmd.replace('VAL', i))
+      await delay(200)
+    }
+    await sendCommand('LED:PWM:0:0:0')
+    
+    const passed = await waitForUser(`Did the ${c.name} LED smoothly sweep from off to full brightness?`)
+    addResult(`${c.name} LED Sweep`, passed, passed ? 'Verified by User' : 'Failed User Verification')
+  }
+
+  // NEW: Restore the user's previous LED states!
+  await sendCommand('LED:OVERRIDE:0') 
+  await sendCommand(`LED:PWM:${prevR}:${prevG}:${prevB}`)
+  await sendCommand(`LED:MUTE:${prevMuted ? 1 : 0}`)
+  store.ledState.muted = prevMuted
+
+  // PHASE 4: Power Rails
+  currentPhase.value = 'Power Rails Verification'
+  promptMessage.value = 'Checking active power rails against limits...'
+  await delay(500)
+
+  checkRange('1.2V Core Rail', store.powerData['1v2_core'].v, 1.15, 1.25, 'V')
+  checkRange('3.3V FPGA Rail', store.powerData['3v3_fpga'].v, 3.20, 3.40, 'V')
+  checkRange('3.3V MCU Rail', store.powerData['3v3_mcu'].v, 3.20, 3.40, 'V')
+  checkRange('3.3V EXT Rail', store.powerData['3v3_ext'].v, 3.20, 3.40, 'V')
+
+  // Finish
+  currentPhase.value = 'Diagnostics Complete'
+  promptMessage.value = 'All checks finished. You may close this window.'
+  
+  // NEW: Clear the console at the end to leave a clean slate
+  store.logs =[] 
+  store.addLog(">>> Diagnostic Sequence Complete.", "var(--success)")
+  
+  isRunning.value = false
+}
+
+// Close Modal Logic (Shared by button, backdrop, and Esc key)
+const closeModal = () => {
+  if (!isRunning.value) store.showDiagnosticModal = false;
+}
+
+// Handle Escape Key
+const handleKeydown = (e) => {
+  if (e.key === 'Escape') {
+    closeModal()
+  }
+}
+
+// Attach/Detach Event Listener for Escape Key
+onMounted(() => {
+  window.addEventListener('keydown', handleKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeydown)
+})
+</script>
+
+<template>
+  <!-- NEW: @click.self ensures clicking the dark background (not the modal itself) closes it -->
+  <div class="modal-overlay" @click.self="closeModal">
+    <div class="diag-modal">
+      
+      <!-- Sticky Header -->
+      <div class="modal-header">
+        <div class="header-title">🩺 Full System Diagnostics</div>
+        <button class="close-btn" @click="closeModal" :disabled="isRunning">×</button>
+      </div>
+      
+      <!-- 2-Column Body -->
+      <div class="modal-body">
+        
+        <!-- Left Column: Prompts & Controls -->
+        <div class="interactive-panel">
+          <div class="phase-badge">{{ currentPhase }}</div>
+          
+          <div class="prompt-box" :class="{ 'needs-action': requiresUserAction, 'active': isRunning }">
+            {{ promptMessage }}
+          </div>
+
+          <div v-if="requiresUserAction" class="action-buttons">
+            <button class="btn-pass" @click="userResponse = true">YES (Pass)</button>
+            <button class="btn-fail" @click="userResponse = false">NO (Fail)</button>
+          </div>
+          
+          <button v-if="!isRunning && !requiresUserAction" class="start-btn" @click="startDiagnostics" :disabled="!store.isConnected">
+            Start Diagnostics
+          </button>
+        </div>
+
+        <!-- Right Column: Scrolling Results List -->
+        <div class="results-panel">
+          <div class="results-header">Verification Results</div>
+          
+          <div class="results-list" ref="resultsListRef">
+            <div v-if="testResults.length === 0" class="empty-results">Waiting for test data...</div>
+            
+            <div class="result-row" v-for="(res, idx) in testResults" :key="idx">
+              <span class="res-name">{{ res.name }}</span>
+              <span class="res-detail">{{ res.detail }}</span>
+              <span class="res-badge" :class="res.pass ? 'pass' : 'fail'">
+                {{ res.pass ? 'PASS' : 'FAIL' }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.modal-overlay {
+  position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+  background: rgba(15, 23, 42, 0.8); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center; z-index: 9999;
+}
+
+.diag-modal {
+  background: var(--paper);
+  width: 900px;
+  max-width: 95vw;
+  height: 80vh; 
+  max-height: 800px;
+  border-radius: 12px;
+  border: 1px solid var(--edge);
+  box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+  display: flex; 
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* --- FIXED HEADER STYLES --- */
+.modal-header {
+  background: #f8fafc;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--edge);
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center;
+  flex-shrink: 0;
+  width: 100%;             /* Force full width */
+  box-sizing: border-box;  /* Keep padding contained inside 100% */
+}
+
+.header-title {
+  font-weight: 800; 
+  font-size: 1.1rem; 
+  color: var(--ink);
+  white-space: nowrap;     /* Forbid wrapping to second line */
+}
+
+.close-btn {
+  background: transparent; 
+  border: none; 
+  font-size: 1.6rem; 
+  color: #94a3b8; 
+  cursor: pointer; 
+  width: 32px;            /* Fix button size as a square */
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: 0.2s;
+}
+.close-btn:hover:not(:disabled) { background: #f1f5f9; color: var(--error); }
+.close-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* --- BODY STYLES --- */
+.modal-body {
+  padding: 24px;
+  display: grid; 
+  grid-template-columns: 1fr 1.3fr;
+  gap: 24px;
+  flex-grow: 1;
+  min-height: 0; 
+  box-sizing: border-box;
+}
+
+.interactive-panel { display: flex; flex-direction: column; gap: 16px; align-items: center; }
+
+.phase-badge {
+  background: var(--ink); color: white; padding: 6px 16px; border-radius: 20px; 
+  font-size: 0.75rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em;
+}
+
+.prompt-box { 
+  background: white; border: 2px dashed var(--edge); padding: 32px 20px; 
+  text-align: center; border-radius: 8px; font-weight: 700; color: #64748b; 
+  font-size: 1.05rem; transition: 0.3s; width: 100%; line-height: 1.5;
+}
+.prompt-box.active { border-color: var(--info); color: var(--ink); background: #eff6ff; border-style: solid; }
+.prompt-box.needs-action { border-color: var(--warning); background: #fffbeb; color: #d97706; border-style: solid; }
+
+.action-buttons { display: flex; gap: 16px; width: 100%; }
+.action-buttons button { flex: 1; padding: 16px; font-weight: 800; font-size: 1rem; border: none; border-radius: 8px; cursor: pointer; color: white; transition: 0.2s; box-shadow: 0 4px 6px rgba(0,0,0,0.1);}
+.btn-pass { background: var(--success); }
+.btn-pass:hover { background: #059669; transform: translateY(-2px); }
+.btn-fail { background: var(--error); }
+.btn-fail:hover { background: #dc2626; transform: translateY(-2px); }
+
+.start-btn {
+  width: 100%; padding: 16px; background: var(--info); color: white; border: none; 
+  border-radius: 8px; font-weight: 800; font-size: 1rem; cursor: pointer; transition: 0.2s;
+  margin-top: auto;
+}
+.start-btn:hover:not(:disabled) { background: #2563eb; }
+.start-btn:disabled { background: var(--edge); color: #94a3b8; cursor: not-allowed; }
+
+.results-panel {
+  display: flex; flex-direction: column;
+  background: var(--ghost); border: 1px solid var(--edge); border-radius: 8px;
+  overflow: hidden; 
+}
+
+.results-header {
+  padding: 12px 16px; background: #f1f5f9; border-bottom: 1px solid var(--edge);
+  font-weight: 800; font-size: 0.8rem; color: var(--accent); text-transform: uppercase; flex-shrink: 0;
+}
+
+.results-list {
+  padding: 16px; display: flex; flex-direction: column; gap: 8px;
+  overflow-y: auto; flex-grow: 1; scrollbar-width: thin;
+}
+
+.empty-results { text-align: center; color: #94a3b8; font-size: 0.9rem; font-weight: 600; margin-top: 40px;}
+
+.result-row { 
+  display: flex; justify-content: space-between; align-items: center; 
+  background: white; padding: 12px 16px; border: 1px solid var(--edge); border-radius: 6px; 
+}
+.res-name { font-weight: 700; font-size: 0.85rem; color: var(--ink); width: 140px; }
+.res-detail { font-family: 'Fira Code', monospace; font-size: 0.8rem; color: #64748b; flex-grow: 1; text-align: center; }
+.res-badge { font-weight: 800; font-size: 0.75rem; padding: 4px 12px; border-radius: 6px; }
+.res-badge.pass { background: #dcfce7; color: #166534; }
+.res-badge.fail { background: #fee2e2; color: #991b1b; }
+</style>
+
+==================================================
+
+- src -> components -> Header.vue
+
+<script setup>
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useSystemStore } from '../stores/systemStore'
+import { useSerial } from '../composables/useSerial'
+
+const store = useSystemStore()
+const { connect, sendCommand } = useSerial()
+
+const props = defineProps(['activeTab'])
+const emit = defineEmits(['update:activeTab'])
+
+const setTab = (tab) => emit('update:activeTab', tab)
+
+const delay = (ms) => new Promise(res => setTimeout(res, ms))
+
+const toggleAppMode = () => {
+  store.appMode = store.appMode === 'HW' ? 'SW' : 'HW'
+}
+
+watch([() => store.bqData.mode, () => store.bqData.rawRegs, () => store.clockStatus], ([mode, regs, clk]) => {
+  // Wait until we actually have the hardware register dump
+  if (!store.isConnected || !regs || regs.length < 0x13) return;
+
+  // Reconstruct the current OTG voltage setting from the BQ registers
+  const votgWord = (regs[0x0B] << 8) | regs[0x0C];
+  const currentVotg = (votgWord * 10) + 2800;
+
+  // Deduce the macro state
+  if (mode === 'OTG') {
+    // If we are running on battery, check the voltage limit to determine Eco vs Max
+    store.sysMode = currentVotg <= 3600 ? 'ECO_BACKUP' : 'HV_BACKUP';
+  } else if (clk === 'IDLE' || clk === 'STANDBY') {
+    // If not on battery and the clock is suspended, we are in Standby
+    store.sysMode = 'STANDBY';
+  } else {
+    // Standard operation
+    store.sysMode = 'ACTIVE';
+  }
+}, { deep: true });
+
+// ==========================================
+// CUSTOM DROPDOWN LOGIC
+// ==========================================
+const showSysMode = ref(false)
+const sysModeWrapperRef = ref(null)
+
+const sysModes = [
+  { id: 'ACTIVE', label: 'Mode: Active' },
+  { id: 'STANDBY', label: 'Mode: Standby' },
+  { id: 'ECO_BACKUP', label: 'Eco Backup (3.6V)' },
+  { id: 'HV_BACKUP', label: 'Max Backup (5.5V)' }
+]
+
+const currentModeLabel = computed(() => {
+  const mode = sysModes.find(m => m.id === store.sysMode)
+  return mode ? mode.label : 'Select Mode'
+})
+
+// Click-away listener to close the dropdown
+const closeDropdown = (e) => {
+  if (showSysMode.value && sysModeWrapperRef.value && !sysModeWrapperRef.value.contains(e.target)) {
+    showSysMode.value = false
+  }
+}
+
+onMounted(() => document.addEventListener('click', closeDropdown))
+onUnmounted(() => document.removeEventListener('click', closeDropdown))
+
+// Applies the selected mode to the hardware
+const applySystemMode = async (modeId) => {
+  showSysMode.value = false // Close the menu visually
+  store.sysMode = modeId
+  
+  if (!store.isConnected) return
+
+  if (modeId === 'ACTIVE') {
+    await sendCommand('SYS:SLEEP:0')
+    await sendCommand('BQ:TEST_BACKUP:0')
+    store.ledState.muted = false
+  } 
+  else if (modeId === 'STANDBY') {
+    await sendCommand('BQ:TEST_BACKUP:0') 
+    await sendCommand('SYS:SLEEP:1')
+    store.ledState.muted = true
+  } 
+  else if (modeId === 'ECO_BACKUP') {
+    await sendCommand('SYS:SLEEP:0')
+    await sendCommand('BQ:VOTG:3600') // 3.6V limit
+    await delay(100)                  // Let the I2C register settle
+    await sendCommand('BQ:TEST_BACKUP:1')
+    store.ledState.muted = false
+  } 
+  else if (modeId === 'HV_BACKUP') {
+    await sendCommand('SYS:SLEEP:0')
+    await sendCommand('BQ:VOTG:5500') // 5.5V limit
+    await delay(100)                  // Let the I2C register settle
+    await sendCommand('BQ:TEST_BACKUP:1')
+    store.ledState.muted = false
+  }
+}
+</script>
+
+<template>
+  <header>
+    <!-- Left Side: Brand & Navigation -->
+    <div class="header-left">
+      <div class="brand">
+        <div class="logo-box">IL</div>
+        <h1 style="margin:0; font-size:1.1rem;">InkLab <span style="font-weight: 300; color: #64748b;">DevConsole</span></h1>
+      </div>
+      
+      <div class="nav-tabs">
+        <button 
+          v-for="tab in store.availableTabs[store.appMode]" 
+          :key="tab.id"
+          class="tab-btn" 
+          :class="{ active: activeTab === tab.id }" 
+          @click="setTab(tab.id)">
+          {{ tab.label }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Right Side: Control Panel Row -->
+    <div class="header-actions">
+      
+      <!-- 1. One-Click HW / SW Segmented Toggle -->
+      <div class="segmented-mode" title="Toggle App Mode">
+        <div class="segment" :class="{active: store.appMode === 'CONFIG'}" @click="store.appMode = 'CONFIG'">CONFIG</div>
+        <div class="segment" :class="{active: store.appMode === 'DEBUG'}" @click="store.appMode = 'DEBUG'">DEBUG</div>
+        <div class="segment" :class="{active: store.appMode === 'APP'}" @click="store.appMode = 'APP'">APP</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- 2. System Power Mode Selector (Custom Styled UI) -->
+      <div class="sys-mode-wrapper" ref="sysModeWrapperRef">
+        
+        <!-- The visual trigger button -->
+        <button class="custom-select-btn" @click="showSysMode = !showSysMode" :disabled="!store.isConnected">
+          <span class="mode-icon">⚡</span>
+          <span class="mode-label">{{ currentModeLabel }}</span>
+          <span class="custom-caret">▼</span>
+        </button>
+
+        <!-- The beautiful, custom dropdown menu box -->
+        <div v-if="showSysMode" class="custom-options-menu">
+          <div 
+            v-for="mode in sysModes" 
+            :key="mode.id"
+            class="custom-option"
+            :class="{ selected: store.sysMode === mode.id }"
+            @click="applySystemMode(mode.id)"
+          >
+            {{ mode.label }}
+          </div>
+        </div>
+
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- 3. Diagnostics Launcher -->
+      <button class="diag-btn" @click="store.showDiagnosticModal = true" title="System Diagnostics">
+        🩺
+      </button>
+
+      <!-- 4. Minimalist Connection Indicator -->
+      <div class="conn-status" :class="{ linked: store.isConnected }" @click="!store.isConnected && connect()">
+        <div class="dot"></div>
+        <span>{{ store.isConnected ? 'Linked' : 'Connect' }}</span>
+      </div>
+
+    </div>
+  </header>
+</template>
+
+<style scoped>
+header { 
+  background: var(--ghost); 
+  padding: 16px 32px; 
+  border-bottom: 1px solid var(--edge); 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center; 
+}
+
+.header-left { display: flex; align-items: center; gap: 64px; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.logo-box { background: var(--ink); color: white; padding: 6px 10px; font-weight: 800; border-radius: 6px; font-size: 0.9rem; }
+.nav-tabs { display: flex; gap: 8px; }
+.tab-btn { background: transparent; color: #64748b; border: none; border-bottom: 2px solid transparent; padding: 8px 16px; cursor: pointer; font-weight: 600; border-radius: 0;   white-space: nowrap; }
+.tab-btn.active { color: var(--info); border-bottom-color: var(--info); }
+
+/* --- RIGHT SIDE CONTROLS --- */
+.header-actions { 
+  display: flex; 
+  align-items: center; 
+  gap: 16px; 
+}
+
+.divider {
+  width: 1px;
+  height: 24px;
+  background: var(--edge);
+}
+
+/* One-Click Segmented HW/SW Toggle */
+.segmented-mode {
+  display: flex;
+  background: #e2e8f0;
+  border-radius: 6px;
+  padding: 3px;
+  cursor: pointer;
+  user-select: none;
+}
+.segment {
+  padding: 4px 14px;
+  font-size: 0.75rem; font-weight: 800; color: #64748b;
+  border-radius: 4px; transition: 0.2s; text-align: center;
+}
+.segment.active {
+  background: white; color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* --- CUSTOM SYSTEM MODE DROPDOWN --- */
+.sys-mode-wrapper {
+  position: relative; /* Anchor for the absolute positioned menu */
+}
+
+.custom-select-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: white;
+  border: 1px solid var(--edge);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-weight: 700;
+  font-size: 0.8rem;
+  color: var(--ink);
+  cursor: pointer;
+  width: auto;
+  min-width: 185px;
+  white-space: nowrap;
+  text-align: left;
+  transition: 0.2s;
+}
+.custom-select-btn:hover:not(:disabled) { background: #f8fafc; border-color: #cbd5e1; }
+.custom-select-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.mode-label { flex-grow: 1; }
+.mode-icon { font-size: 0.9rem; pointer-events: none; }
+.custom-caret { font-size: 0.6rem; color: #94a3b8; pointer-events: none; }
+
+/* The Opened Popover Menu */
+.custom-options-menu {
+  position: absolute;
+  top: calc(100% + 6px); /* Drops it just below the button */
+  left: 0;
+  width: 100%;
+  background: var(--paper);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+  z-index: 100;
+  overflow: hidden; 
+  display: flex;
+  flex-direction: column;
+}
+
+/* Individual Items in Menu */
+.custom-option {
+  padding: 10px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.custom-option:hover {
+  background: var(--ghost);
+  color: var(--info);
+}
+
+/* The Currently Active Item */
+.custom-option.selected {
+  background: #eff6ff;
+  color: var(--info);
+  font-weight: 800;
+}
+
+/* Diagnostics Button */
+.diag-btn {
+  display: flex; align-items: center; justify-content: center;
+  background: white; border: 1px solid var(--edge);
+  width: 34px; height: 34px; border-radius: 6px;
+  cursor: pointer; transition: 0.2s; font-size: 1.1rem;
+}
+.diag-btn:hover { background: #f8fafc; border-color: #cbd5e1; transform: scale(1.05); }
+
+/* Minimalist Connection Indicator */
+.conn-status {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 14px; border-radius: 20px;
+  font-size: 0.75rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em;
+  background: white; border: 1px solid var(--edge);
+  color: var(--ink); cursor: pointer; transition: 0.2s;
+}
+.conn-status:hover:not(.linked) { background: #f8fafc; border-color: #cbd5e1; }
+.conn-status.linked { 
+  background: transparent; border-color: transparent; 
+  cursor: default; color: #64748b; pointer-events: none;
+}
+.dot { 
+  width: 8px; height: 8px; border-radius: 50%; 
+  background: var(--error); box-shadow: 0 0 0 2px rgba(239,68,68,0.2); 
+}
+.conn-status.linked .dot { 
+  background: var(--success); box-shadow: 0 0 0 2px rgba(16,185,129,0.2); 
+}
+</style>
+
+==================================================
+
+- src -> components -> SidebarLog.vue
+
+<script setup>
+import { ref, watch, nextTick, computed, onMounted } from 'vue'
+import { useSystemStore } from '../stores/systemStore'
+
+const store = useSystemStore()
+const logContainer = ref(null)
+
+const toggleAutoscroll = () => {
+  store.sidebarAutoScroll = !store.sidebarAutoScroll
+  if (store.sidebarAutoScroll && logContainer.value) {
+    logContainer.value.scrollTop = logContainer.value.scrollHeight
+  }
+}
+
+// Track user scrolling. If they scroll up, disable autoscroll and save location.
+const onLogScroll = (e) => {
+  const { scrollTop, scrollHeight, clientHeight } = e.target
+  store.sidebarAutoScroll = scrollHeight - scrollTop <= clientHeight + 10
+  store.sidebarScrollState = scrollTop
+}
+
+onMounted(async () => {
+  await nextTick() // Give the DOM a frame to populate the log array
+  if (logContainer.value) {
+    if (store.sidebarAutoScroll) {
+      logContainer.value.scrollTop = logContainer.value.scrollHeight
+    } else {
+      logContainer.value.scrollTop = store.sidebarScrollState
+    }
+  }
+})
+
+// Determine FPGA Status based on the clock and active slot
+const fpgaState = computed(() => {
+  const clk = store.clockStatus.toUpperCase()
+  const slot = store.activeSlot
+
+  if (clk.includes('FAILED')) return { label: 'ERROR', color: 'var(--error)' }
+  if (slot === '--' || slot.includes('(00)')) return { label: 'ZERO BITSTREAM', color: 'var(--warning)' }
+  if (clk.includes('PULSING')) return { label: 'PROGRAMMED', color: 'var(--success)' }
+  
+  return { label: clk === 'IDLE' ? 'STANDBY' : clk, color: '#94a3b8' }
+})
+
+watch(() => store.logs.length, async () => {
+  if (store.sidebarAutoScroll && logContainer.value) {
+    await nextTick()
+    logContainer.value.scrollTop = logContainer.value.scrollHeight
+  }
+})
+</script>
+
+<template>
+  <div class="content-right">
+    
+    <!-- Always-Visible System HUD (4 Columns) -->
+    <div class="quick-hud">
+      <div class="hud-item" title="SD Card Detection">
+        <span>STORAGE</span>
+        <strong :style="{ color: store.isSdInserted ? 'var(--success)' : 'var(--error)' }">
+          {{ store.isSdInserted ? 'MEDIA OK' : 'NO MEDIA' }}
+        </strong>
+      </div>
+
+    <div class="hud-item" title="Main Input / PMID Output Power">
+        <span>{{ store.bqData.mode === 'OTG' ? 'PMID (BAT)' : 'PMID (USB)' }}</span>
+        <strong>
+          {{ store.bqData.vbusVolt.toFixed(1) }}V / 
+          {{ Math.abs(store.bqData.mode === 'OTG' ? store.bqData.batCurr : store.bqData.vbusCurr).toFixed(0) }}mA
+        </strong>
+    </div>
+      
+      <div class="hud-item" title="Battery Pack Status">
+        <span>BATTERY</span>
+        <strong :style="{ color: store.bqData.soc < 20 ? 'var(--error)' : 'var(--success)' }">
+          {{ store.bqData.soc.toFixed(0) }}%
+        </strong>
+      </div>
+
+      <div class="hud-item" title="FPGA Configuration Status">
+        <span>FPGA STAT</span>
+        <strong :style="{ color: fpgaState.color }">{{ fpgaState.label }}</strong>
+      </div>
+    </div>
+
+    <!-- Terminal Header -->
+    <div id="log-header">
+      <span>System Log</span>
+      <div class="log-actions">
+        <span class="autoscroll-toggle" :class="{active: store.sidebarAutoScroll}" @click="toggleAutoscroll">
+          Autoscroll: {{ store.sidebarAutoScroll ? 'ON' : 'OFF' }}
+        </span>
+        <span class="clear-link" @click="store.clearLogs()">Clear</span>
+      </div>
+    </div>
+
+    <!-- Terminal Output -->
+    <div id="log" ref="logContainer" @scroll="onLogScroll">
+      <div v-if="store.logs.length === 0" style="color: #94a3b8; font-style: italic;">
+        {{ store.isConnected ? `${store.fwName} (${store.fwVersion}) - Terminal Ready.` : 'Console cleared. Listening for incoming telemetry...' }}
+      </div>
+      <div v-for="(log, idx) in store.logs" :key="idx">
+        <span style="color:#64748b">[{{ log.time }}]</span>
+        <span :style="{color: log.color}"> {{ log.msg }}</span>
+      </div>
+    </div>
+
+  </div>
+</template>
+
+<style scoped>
+.content-right { 
+  background: #0f172a; 
+  display: flex; 
+  flex-direction: column; 
+  height: 100%; 
+  min-height: 0; 
+}
+/* HUD Styles */
+.quick-hud { 
+  display: grid; 
+  /* Adjusted fractions to give the last column enough room */
+  grid-template-columns: 0.8fr 1.1fr 0.8fr 1.3fr; 
+  background: #0b1120; 
+  border-bottom: 1px solid #1e293b; 
+}
+
+.hud-item { 
+  padding: 12px 10px; /* Slightly reduced side padding to save space */
+  display: flex; 
+  flex-direction: column; /* This restores the vertical stacking! */
+  border-right: 1px solid #1e293b; 
+  justify-content: center;
+  min-width: 0; /* Prevents flexbox from pushing past grid boundaries */
+}
+
+.hud-item:last-child { border-right: none; }
+
+.hud-item span { 
+  font-size: 0.6rem; 
+  color: #64748b; 
+  text-transform: uppercase; 
+  font-weight: 800; 
+  margin-bottom: 4px; 
+  letter-spacing: 0.05em;
+}
+
+.hud-item strong { 
+  font-family: 'Fira Code', monospace; 
+  font-size: 0.75rem; /* Scaled down slightly to fit longer statuses */
+  color: var(--success); 
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis; /* Adds '...' if the text is somehow still too long */
+}
+
+/* Log Styles */
+#log-header { 
+  padding: 12px 20px; 
+  background: #1e293b; 
+  color: #94a3b8; 
+  font-size: 0.7rem; 
+  font-weight: 700; 
+  text-transform: uppercase; 
+  border-bottom: 1px solid #334155; 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center; 
+}
+
+#log { 
+  flex-grow: 1; 
+  padding: 20px; 
+  font-family: 'Fira Code', monospace; 
+  font-size: 0.75rem; 
+  color: #e2e8f0; 
+  overflow-y: auto; 
+  white-space: pre-wrap; 
+  line-height: 1.4; 
+}
+
+.log-actions { display: flex; gap: 15px; align-items: center; }
+
+.clear-link, .autoscroll-toggle { 
+  cursor: pointer; 
+  text-transform: none; 
+  font-weight: 400; 
+  transition: color 0.2s; 
+  color: #64748b;
+}
+
+.clear-link:hover { color: #e2e8f0; }
+.autoscroll-toggle.active { color: var(--info); font-weight: 700; }
+</style>
+
+==================================================
+
+- src -> components -> views -> AlgorithmDashboard.vue
+
+<template>
+  <div class="algo-page">
+    <div class="header-banner">
+      <span class="section-label">Glucose Analysis Engine</span>
+    </div>
+    
+    <div class="grid-layout">
+      <!-- The Big Chart -->
+      <div class="chart-card large">
+        <div class="card-title">Real-time Glucose Trend (mg/dL)</div>
+        <div class="chart-placeholder">
+          <!-- You can re-use the Chart.js logic from PowerDashboard here -->
+          <p class="empty-msg">Algorithm Engine: Standby</p>
+        </div>
+      </div>
+
+      <!-- Stats Cards -->
+      <div class="stats-sidebar">
+        <div class="stat-card" v-for="stat in ['Mean', 'GMI', 'CV', 'TIR']" :key="stat">
+          <label>{{ stat }}</label>
+          <div class="val">--</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.algo-page { display: flex; flex-direction: column; gap: 20px; padding: 20px; }
+.grid-layout { display: grid; grid-template-columns: 3fr 1fr; gap: 20px; }
+.chart-card { background: white; border: 1px solid var(--edge); border-radius: 12px; padding: 20px; height: 400px; }
+.chart-placeholder { border: 2px dashed var(--edge); height: 80%; display: flex; align-items: center; justify-content: center; border-radius: 8px; }
+.stat-card { background: var(--ghost); padding: 20px; border-radius: 8px; border: 1px solid var(--edge); text-align: center; }
+.stat-card label { display: block; font-size: 0.7rem; color: #64748b; text-transform: uppercase; margin-bottom: 8px; }
+.stat-card .val { font-size: 1.5rem; font-weight: 800; font-family: monospace; }
+</style>
+
+==================================================
+
+- src -> components -> views -> AutomationBench.vue
+
+<script setup>
+import { ref } from 'vue'
+import { useSystemStore } from '../../stores/systemStore'
+import { useSerial } from '../../composables/useSerial'
+
+const store = useSystemStore()
+const { sendCommand, startUpload } = useSerial()
+
+const mcuTime = ref(0)
+const jsTime = ref(0)
+const macroTime = ref(0)
+const isRunning = ref(false)
+const isSweeping = ref(false) // <-- Add this line right here
+
+const ITERATIONS = 10;
+const workload = [
+  'SPI:PING',
+  'ADC:READ',
+  'UART:TX:B',
+  'EXT:GPIO:PB0:1',
+  'EXT:GPIO:PB0:0'
+];
+
+const runMcuNativeAsync = () => {
+  return new Promise((resolve) => {
+    const handler = (e) => { window.removeEventListener('bench-mcu-done', handler); resolve(e.detail) }
+    window.addEventListener('bench-mcu-done', handler)
+    sendCommand('BENCHMARK:NATIVE')
+    setTimeout(() => { window.removeEventListener('bench-mcu-done', handler); resolve("TIMEOUT") }, 2000)
+  })
+}
+
+const runComparison = async () => {
+  if (!store.isConnected) { store.addNotification("Connect hardware first!", "error"); return }
+  isRunning.value = true; mcuTime.value = 0; jsTime.value = 0; macroTime.value = 0;
+
+  store.addLog(">>> Starting Mixed-Signal Benchmark", "var(--info)")
+
+  // ----------------------------------------------------------------
+  // 1. JAVASCRIPT USB BENCHMARK
+  // ----------------------------------------------------------------
+  store.addLog(`Running Phase 1: Browser JS over USB (${ITERATIONS * workload.length} ops)...`, "var(--warning)")
+  
+  const startJs = performance.now()
+  const jsPromise = new Promise((resolve) => {
+    const handler = () => { window.removeEventListener('bench-js-done', handler); resolve(performance.now() - startJs) }
+    window.addEventListener('bench-js-done', handler)
+  })
+
+  // Blast the mixed workload into the USB queue
+  for (let i = 0; i < ITERATIONS; i++) {
+    for (const cmd of workload) {
+      await sendCommand(cmd)
+    }
+  }
+  await sendCommand('BENCHMARK:JS_END') // Mark the end of the queue
+  
+  // Race against a timeout to prevent UI freezes
+  jsTime.value = await Promise.race([jsPromise, new Promise(r => setTimeout(() => r("TIMEOUT"), 3000))])
+
+  // ----------------------------------------------------------------
+  // 2. SD CARD MACRO BENCHMARK (The "Virtual Computer")
+  // ----------------------------------------------------------------
+  store.addLog("Running Phase 2: Uploading Macro to SD Card...", "var(--info)")
+  
+  let macroText = "# Mixed-Signal Validation Script\n"
+  for (let i = 0; i < ITERATIONS; i++) {
+    macroText += workload.join('\n') + '\n'
+  }
+  
+  const encoder = new TextEncoder()
+  const macroBytes = encoder.encode(macroText)
+  
+  await startUpload(macroBytes, 15, 2, "bench_script")
+  await new Promise(r => setTimeout(r, 1000)) // Wait for file closure
+  
+store.addLog("Executing SD Macro Engine...", "var(--warning)")
+  
+  // REPLACED: Use exact same bulletproof listener as the other phases
+  const macroPromise = new Promise((resolve) => {
+    const handler = (e) => { 
+      window.removeEventListener('bench-macro-done', handler); 
+      resolve(e.detail === 0 ? "< 1" : e.detail);
+    }
+    window.addEventListener('bench-macro-done', handler)
+  })
+  
+  sendCommand('MACRO:RUN:slot15.bin')
+  
+  macroTime.value = await Promise.race([macroPromise, new Promise(r => setTimeout(() => r("TIMEOUT"), 3000))])
+
+  // ----------------------------------------------------------------
+  // 3. NATIVE C BENCHMARK
+  // ----------------------------------------------------------------
+  store.addLog("Running Phase 3: Native C (Edge)...", "var(--warning)")
+  let cTime = await runMcuNativeAsync()
+  mcuTime.value = cTime === 0 ? "< 1" : cTime
+
+  store.addLog(">>> Architecture Benchmark Complete.", "var(--success)")
+  isRunning.value = false
+}
+
+// --- UPDATED FAST TELEMETRY GATHERER ---
+const gatherFastAverage = (numSamples) => {
+  return new Promise((resolve) => {
+    let count = 0;
+    let sumCoreI = 0, sumCoreV = 0;
+    let sumFpgaI = 0, sumFpgaV = 0;
+    
+    const handler = (e) => {
+      const data = e.detail;
+      // data["1"] is Core INA [V, mA], data["2"] is FPGA INA [V, mA]
+      if (data["1"] && data["2"]) {
+        sumCoreV += data["1"][0];
+        sumCoreI += data["1"][1];
+        sumFpgaV += data["2"][0];
+        sumFpgaI += data["2"][1];
+        count++;
+        
+        if (count >= numSamples) {
+          window.removeEventListener('fast-telemetry', handler);
+          resolve({ 
+            core_v: sumCoreV / count, core_i: sumCoreI / count, 
+            fpga_v: sumFpgaV / count, fpga_i: sumFpgaI / count 
+          });
+        }
+      }
+    };
+    
+    window.addEventListener('fast-telemetry', handler);
+    
+    // Safety timeout in case stream drops
+    setTimeout(() => {
+      window.removeEventListener('fast-telemetry', handler);
+      resolve({ 
+        core_v: sumCoreV / (count || 1), core_i: sumCoreI / (count || 1), 
+        fpga_v: sumFpgaV / (count || 1), fpga_i: sumFpgaI / (count || 1) 
+      });
+    }, 2000);
+  });
+}
+
+// --- HELPER TO DOWNLOAD CSV ---
+const downloadCsv = (content, filename) => {
+  const blob = new Blob([content], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// --- NEW SWEEP METHODOLOGY ---
+const runCapacitanceSweep = async () => {
+  if (!store.isConnected) { store.addNotification("Connect hardware first!", "error"); return }
+  isSweeping.value = true
+  store.addLog(">>> Starting Automated Power-Capacitance Matrix Sweep...", "var(--info)")
+
+  // 1. Enable Fast Mode
+  await sendCommand('TELEM:FAST:1:1v2_core')
+  await sendCommand('TELEM:FAST:2:3v3_fpga')
+  await new Promise(r => setTimeout(r, 200)) // Let stream start
+
+  // 2. Safely figure out the current slot so SETCLK applies immediately
+  let activeSlotInt = 1;
+  const slotMatch = store.activeSlot.match(/\((\d+)\)/);
+  if (slotMatch) activeSlotInt = parseInt(slotMatch[1], 10);
+  else if (store.activeSlot !== '--') activeSlotInt = parseInt(store.activeSlot, 10) || 1;
+
+  let rawCsv = "Frequency_MHz,Active_Pins,1.2V_Core_mA,3.3V_FPGA_mA\n"
+  let capCsv = "Frequency_MHz,Pin_Index,Delta_I_mA,Voltage_V,Calculated_Capacitance_pF\n"
+  const dividers = [128, 64, 32, 16, 8, 4, 2] // 0.5MHz to 32MHz
+
+  for (let div of dividers) {
+    const freq_MHz = 64 / div
+    const toggleFreq_MHz = freq_MHz / 2; // Pin toggle frequency is half the MCU clock
+    store.addLog(`Sweeping Frequency: ${freq_MHz} MHz`, "var(--warning)")
+    
+  // Turn off previous sweep's pins first
+  await sendCommand(`SPI:GPIO_DIR:0`)
+  await sendCommand(`SPI:GPIO_WR:0`)
+  await new Promise(r => setTimeout(r, 100)) 
+
+  // Now it is safe to change the clock without power spikes
+  await sendCommand(`SETCLK:${activeSlotInt}:${div}`)
+  await new Promise(r => setTimeout(r, 400))
+
+    // Reset mask to zero for baseline Quiescent Current
+    let currentMask = 0;
+    await sendCommand(`SPI:GPIO_DIR:0`)
+    await sendCommand(`SPI:GPIO_WR:0`)
+    await new Promise(r => setTimeout(r, 100)) // Let power stabilize
+
+    // Capture Baseline
+    const quiescentAvg = await gatherFastAverage(50); // Take 50 samples for solid baseline
+    let prevFpgaCurrent = quiescentAvg.fpga_i;
+    let currentVoltage = quiescentAvg.fpga_v;
+
+    rawCsv += `${freq_MHz},0,${quiescentAvg.core_i.toFixed(3)},${quiescentAvg.fpga_i.toFixed(3)}\n`
+
+    // Cumulatively turn on one pin at a time
+    for (let pin = 0; pin <= 30; pin++) {
+      currentMask |= (1 << pin);
+
+      // JS bitwise operations become signed at 32-bits, so we split it safely
+      const maskLower = currentMask & 0xFFFF;
+      const maskUpper = (currentMask >>> 16) & 0xFFFF;
+
+      await sendCommand(`SPI:GPIO_DIR:${maskLower.toString(16)}`)
+      await sendCommand(`SPI:GPIO_WR:${maskUpper.toString(16)}`)
+
+      // Wait 50ms for hardware capacitance to physically settle
+      await new Promise(r => setTimeout(r, 50))
+
+      // Gather exactly 20 samples & average them
+      const avg = await gatherFastAverage(20)
+      rawCsv += `${freq_MHz},${pin + 1},${avg.core_i.toFixed(3)},${avg.fpga_i.toFixed(3)}\n`
+
+      // --- Capacitance Calculation ---
+      // C = I / (V * f). To get pF from mA, V, and MHz: (mA * 1000) / (V * MHz)
+      const delta_I = avg.fpga_i - prevFpgaCurrent;
+      prevFpgaCurrent = avg.fpga_i; // Update for the next pin
+
+      let capacitance_pF = 0;
+      if (delta_I > 0 && currentVoltage > 0) {
+        capacitance_pF = (delta_I * 1000) / (currentVoltage * toggleFreq_MHz);
+      }
+
+      capCsv += `${freq_MHz},${pin},${delta_I.toFixed(4)},${currentVoltage.toFixed(3)},${capacitance_pF.toFixed(2)}\n`
+    }
+  }
+
+  // Cleanup & Return to normal
+  await sendCommand(`SPI:GPIO_DIR:0`)
+  await sendCommand(`SPI:GPIO_WR:0`)
+  await sendCommand('TELEM:FAST:1:OFF')
+  await sendCommand('TELEM:FAST:2:OFF')
+
+  store.addLog(">>> Sweep Complete! Generating CSV Data...", "var(--success)")
+
+  downloadCsv(rawCsv, `Raw_Sweep_${new Date().getTime()}.csv`)
+  downloadCsv(capCsv, `Pin_Capacitance_${new Date().getTime()}.csv`)
+
+  isSweeping.value = false
+}
+</script>
+
+<template>
+  <div class="automation-page">
+    <div class="header-banner">
+      <span class="section-label" style="border: none; margin: 0; padding: 0;">Mixed-Signal Latency Benchmark</span>
+    </div>
+
+    <div class="split-layout">
+      <div class="left-panel">
+        <div class="info-card">
+          <h3>The "Hardware-in-the-Loop" Test</h3>
+          <p>We are executing a sequence of 5 mixed-signal operations (SPI Ping, ADC Read, UART Transmit, and 2x GPIO states) repeated 10 times across three computing architectures.</p>
+          <ul>
+            <li><b>Browser JS:</b> Text parsed packet-by-packet over USB CDC.</li>
+            <li><b>SD Macro Interpreter:</b> Text read from local SD Card and parsed dynamically.</li>
+            <li><b>Native C:</b> Direct register/HAL calls compiled into machine code.</li>
+          </ul>
+        </div>
+
+        <button class="btn-primary start-btn" @click="runComparison" :disabled="isRunning || !store.isConnected">
+          {{ isRunning ? 'Running Benchmark Sequence...' : '▶ RUN ARCHITECTURE BENCHMARK' }}
+        </button>
+
+        <div class="results-card" v-if="jsTime > 0">
+          <div class="bar-chart">
+            <div class="bar-row">
+              <span class="label">Browser JS (USB)</span>
+              <div class="bar js-bar" style="width: 100%">{{ typeof jsTime === 'number' ? jsTime.toFixed(1) : jsTime }} ms</div>
+            </div>
+            
+            <div class="bar-row">
+              <span class="label">SD Card Interpreter (VM)</span>
+              <div class="bar macro-bar" :style="{ width: Math.max((macroTime / jsTime) * 100, 2) + '%' }">{{ macroTime }} ms</div>
+            </div>
+
+            <div class="bar-row">
+              <span class="label">Native STM32 (C)</span>
+              <div class="bar mcu-bar" :style="{ width: Math.max((mcuTime / jsTime) * 100, 1) + '%' }">{{ mcuTime }} ms</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <button class="btn-primary start-btn" @click="runCapacitanceSweep" :disabled="isSweeping || isRunning || !store.isConnected" style="margin-top: 10px; background: var(--info);">
+    {{ isSweeping ? 'Sweeping Power Matrix...' : '📊 RUN CAPACITANCE MATRIX SWEEP (CSV)' }}
+</button>
+</template>
+
+<style scoped>
+.automation-page { display: flex; flex-direction: column; gap: 20px; height: 100%; padding: 20px; }
+.header-banner { border-bottom: 1px solid var(--edge); padding-bottom: 12px; }
+.section-label { font-weight: 800; font-size: 0.9rem; color: var(--ink); text-transform: uppercase; letter-spacing: 0.05em; }
+.split-layout { display: grid; grid-template-columns: 1fr; gap: 24px; max-width: 800px; }
+.left-panel { display: flex; flex-direction: column; gap: 16px; }
+
+.info-card, .results-card { background: white; border: 1px solid var(--edge); border-radius: 8px; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+.info-card h3 { margin-top: 0; font-size: 1rem; color: var(--info); margin-bottom: 12px;}
+.info-card p, .info-card li { font-size: 0.85rem; color: #475569; line-height: 1.5; }
+
+.start-btn { padding: 16px; font-size: 0.9rem; font-weight: 800; border-radius: 8px; border: none; background: var(--ink); color: white; cursor: pointer; transition: 0.2s;}
+.start-btn:hover:not(:disabled) { background: #334155; }
+
+.bar-chart { display: flex; flex-direction: column; gap: 16px; }
+.bar-row { display: flex; flex-direction: column; gap: 4px; }
+.bar-row .label { font-size: 0.75rem; font-weight: 800; color: #64748b; text-transform: uppercase; }
+.bar { height: 28px; border-radius: 4px; display: flex; align-items: center; padding: 0 12px; font-family: 'Fira Code', monospace; font-size: 0.8rem; font-weight: 700; color: white; transition: width 0.5s;}
+.js-bar { background: var(--error); }
+.macro-bar { background: #f59e0b; min-width: fit-content;}
+.mcu-bar { background: var(--success); min-width: fit-content; }
+</style>
+
+==================================================
+
+- src -> components -> views -> FpgaConfig.vue
+
+<script setup>
+import { ref, computed, onMounted, onActivated, watch } from 'vue'
+import { useSystemStore } from '../../stores/systemStore'
+import { useSerial } from '../../composables/useSerial'
+import CustomSelect from '../CustomSelect.vue' 
+
+const store = useSystemStore()
+const { sendCommand, startUpload, scanSlots } = useSerial()
+
+const fwName = ref('')
+const fwVersion = ref('')
+
+const slotAlias = ref('')
+const selectedSlot = ref(1)
+const clkDivider = ref(2)
+const fileBuffer = ref(null)
+const fileName = ref('Choose .bin')
+
+// --- Advanced Operations State ---
+const showSlotZeroModal = ref(false)
+const showWipeModal = ref(false)
+const showOtaModal = ref(false)
+
+const sourceSlotForZero = ref(1)
+const otaFileBuffer = ref(null)
+const otaFileName = ref('Select Firmware .bin')
+const otaSuccess = ref(false)
+
+const isFpgaStopped = computed(() => {
+  const status = store.clockStatus.toUpperCase();
+  return status.includes('STOPPED') || status === 'IDLE' || status.includes('FAILED');
+})
+const allSlotOptions = computed(() => {
+  return Array.from({ length: 15 }, (_, i) => {
+    const val = i + 1;
+    return {
+      value: val,
+      label: `Slot ${val.toString().padStart(2, '0')} (${store.slotAliases[val] || 'unconfigured'})`
+    }
+  })
+})
+
+watch(() => store.lastProgrammedSlot, (newVal) => {
+  if (newVal !== 'NONE' && newVal !== '--') {
+    const slotNum = parseInt(newVal);
+    if (!isNaN(slotNum) && slotNum >= 1 && slotNum <= 15) {
+      selectedSlot.value = slotNum;
+    }
+  }
+});
+
+watch(showOtaModal, (isShowing) => {
+  if (!isShowing) {
+    otaTerminalLogs.value = [];
+    otaFileBuffer.value = null;
+    otaFileName.value = 'Select Firmware .bin';
+    otaSuccess.value = false;
+  }
+});
+
+watch(() => store.isConnected, (connected) => {
+  if (showOtaModal.value) {
+    const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    if (!connected) {
+      otaTerminalLogs.value.push({ id: otaLogIdCounter++, text: `[${time}] [SYS] Connection lost. MCU is rebooting...` });
+    } else {
+      otaTerminalLogs.value.push({ id: otaLogIdCounter++, text: `[${time}] [SYS] Reconnected! Awaiting firmware validation...` });
+    }
+  }
+});
+
+const incrementDivider = () => { if (clkDivider.value < 128) clkDivider.value *= 2 }
+const decrementDivider = () => { if (clkDivider.value > 2) clkDivider.value /= 2 }
+const freqPreview = computed(() => (64 / clkDivider.value).toFixed(2))
+
+onActivated(() => { if (store.isConnected) scanSlots() })
+onMounted(() => { if (store.isConnected) scanSlots() })
+
+const handleFile = (e) => {
+  const file = e.target.files[0]
+  if (!file) return
+  fileName.value = file.name
+  const fr = new FileReader()
+  fr.onload = (ev) => {
+    fileBuffer.value = new Uint8Array(ev.target.result)
+    store.addLog(`Prepared FPGA Bitstream: ${file.name} (${(fileBuffer.value.length / 1024).toFixed(1)} KB)`)
+  }
+  fr.readAsArrayBuffer(file)
+}
+
+const handleOtaFile = (e) => {
+  const file = e.target.files[0]
+  if (!file) return
+  otaFileName.value = file.name
+  const fr = new FileReader()
+  fr.onload = (ev) => {
+    otaFileBuffer.value = new Uint8Array(ev.target.result)
+    store.addLog(`Prepared MCU Firmware: ${file.name} (${(otaFileBuffer.value.length / 1024).toFixed(1)} KB)`)
+  }
+  fr.readAsArrayBuffer(file)
+}
+
+const clockColor = computed(() => {
+  const txt = store.clockStatus.toUpperCase()
+  if (txt.includes('PULSING')) return 'var(--info)'
+  if (txt.includes('STOPPED') || txt === 'IDLE') return 'var(--warning)'
+  if (txt.includes('FAILED')) return 'var(--error)'
+  return 'var(--success)'
+})
+
+const executeSlotZeroUpdate = () => {
+  store.addLog(`Copying Slot ${sourceSlotForZero.value} to auto-boot Slot 0...`, 'var(--info)')
+  sendCommand(`SYS:SETZERO:${sourceSlotForZero.value}`)
+  setTimeout(() => {
+    store.addLog("SUCCESS: Hard Power Cycling system in 3... 2... 1...", "var(--warning)")
+    sendCommand('BQ:HIZ:1')
+    sendCommand('BQ:DIS_IN:1')
+    setTimeout(() => { sendCommand('BQ:SHIP:2') }, 150)
+  }, 2500)
+  showSlotZeroModal.value = false
+}
+
+// ==================================================
+// VANISHING OTA TERMINAL LOGIC
+// ==================================================
+const otaTerminalLogs = ref([])
+let otaLogIdCounter = 0 
+
+const visibleOtaLogs = computed(() => {
+  return otaTerminalLogs.value.slice(-6);
+})
+
+const getOpacity = (idx, total) => {
+  const distance = total - 1 - idx; 
+  if (distance === 0) return 1.0; 
+  if (distance === 1) return 0.8; 
+  if (distance === 2) return 0.6; 
+  if (distance === 3) return 0.4;
+  if (distance === 4) return 0.25; 
+  return 0.15;                    
+}
+
+// Add this outside the watch function to track progress
+let lastProcessedLength = 0;
+
+// Replace your current watch(() => store.logs, ...) block with this:
+watch(() => store.logs.length, (newLength) => {
+  if (newLength === 0) {
+    lastProcessedLength = 0;
+    return;
+  }
+  
+  // Process every single new log that arrived in this tick
+  for (let i = lastProcessedLength; i < newLength; i++) {
+    const log = store.logs[i];
+    
+    if (log.msg.includes("OTA_LOG:")) {
+      const cleanMsg = log.msg.replace("OTA_LOG: ", "");
+      otaTerminalLogs.value.push({ 
+        id: otaLogIdCounter++, 
+        text: `[${log.time}] ${cleanMsg}` 
+      });
+    }
+
+    if (log.msg.includes("OTA SUCCESS")) {
+      otaSuccess.value = true;
+      otaTerminalLogs.value.push({ 
+        id: otaLogIdCounter++, 
+        text: `[${log.time}] 🌟 UPDATE COMPLETE AND VERIFIED 🌟` 
+      });
+
+      setTimeout(() => {
+        store.addLog(">>> Update complete. Cleaning up background logs...", "var(--success)");
+        setTimeout(() => store.clearLogs(), 50); 
+      }, 2500);
+    }
+  }
+  
+  lastProcessedLength = newLength;
+});
+
+const executeOtaUpdate = async () => {
+  if (!otaFileBuffer.value || !fwName.value || !fwVersion.value) return
+  otaTerminalLogs.value = [] 
+  otaTerminalLogs.value.push({ id: otaLogIdCounter++, text: `[SYS] Initializing OTA Upload for ${otaFileName.value}...` })
+  
+  // 1. AWAIT the command so it finishes acquiring/releasing the serial port lock
+  await sendCommand(`SYS:SET_FW_INFO:${fwName.value}:${fwVersion.value}`)
+  
+  // 2. Give the MCU 100ms to open, write, and close the text file on the SD Card
+  await new Promise(r => setTimeout(r, 100))
+
+  // 3. Now the port is free, and the MCU is ready to receive the heavy bitstream
+  await startUpload(otaFileBuffer.value, 99, 2, "OTA_FW")
+  
+  const unwatch = watch(() => store.isUploading, (isUploading) => {
+    if (!isUploading) {
+      otaTerminalLogs.value.push({ id: otaLogIdCounter++, text: "[SYS] Upload Complete. Triggering Dual-Bank Swap..." })
+      setTimeout(() => sendCommand("SYS:OTA:ota.bin"), 500)
+      unwatch() 
+    }
+  })
+}
+
+const executeWipeSd = () => {
+  sendCommand('SYS:WIPE_SD')
+  setTimeout(() => { scanSlots() }, 500)
+  showWipeModal.value = false
+}
+</script>
+
+<template>
+  <div class="fpga-page">
+    
+    <div class="dashboard">
+      <div class="stat"><div class="stat-label">Transfer</div><div class="stat-value">{{ store.transferSpeed }}</div></div>
+      <div class="stat"><div class="stat-label">Progress</div><div class="stat-value">{{ store.uploadProgress }}%</div></div>
+      <div class="stat"><div class="stat-label">Active Slot</div><div class="stat-value">{{ store.activeSlot }}</div></div>
+      <div class="stat"><div class="stat-label">Clock Status</div><div class="stat-value" :style="{color: clockColor}">{{ store.clockStatus }}</div></div>
+    </div>
+
+    <div class="config-card">
+      <div class="card-header"><span class="section-label">Hardware Configuration</span></div>
+      <div class="controls-grid">
+        <!-- NEW: FPGA Power Toggle -->
+        <div class="control-group">
+          <label>FPGA Power</label>
+          <div class="segmented-control" style="height: 42px;">
+            <button :class="{active: !isFpgaStopped}" @click="sendCommand('SYS:FPGA_PWR:1')" :disabled="!store.isConnected || store.isUploading">ON</button>
+            <button :class="{active: isFpgaStopped}" @click="sendCommand('SYS:FPGA_PWR:0')" :disabled="!store.isConnected || store.isUploading">OFF</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label>Target Memory Slot</label>
+          <CustomSelect v-model="selectedSlot" :options="allSlotOptions" />
+        </div>
+        
+        <div class="control-group">
+          <label>Clock Divider</label>
+          <div class="step-input">
+            <button @click="decrementDivider" :disabled="clkDivider <= 2">-</button>
+            <div class="divider-value"><span>{{ clkDivider }}</span><small>{{ freqPreview }} MHz</small></div>
+            <button @click="incrementDivider" :disabled="clkDivider >= 128">+</button>
+          </div>
+        </div>
+        
+        <div class="control-group">
+          <label> </label>
+          <!-- Disable Apply Clock button if FPGA is powered off -->
+          <button class="btn-warning w-full" @click="sendCommand(`SETCLK:${selectedSlot}:${clkDivider}`)" :disabled="!store.isConnected || store.isUploading || isFpgaStopped">
+            Apply Clock
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="upload-card">
+      <span class="section-label">Bitstream Upload (SD Card)</span>
+      <div class="upload-row">
+        <div class="control-group">
+          <label>Slot Alias (Required)</label>
+          <input type="text" v-model="slotAlias" placeholder="e.g. MyLogic_V1" maxlength="15">
+        </div>
+        <div class="control-group">
+          <label>Select Binary File</label>
+          <div class="file-wrapper">
+            <input type="file" id="fileInput" accept=".bin" @change="handleFile" style="display:none;">
+            <label for="fileInput" class="file-label">{{ fileName }}</label>
+          </div>
+        </div>
+        <div class="control-group">
+          <label>Upload Control</label>
+          <button class="btn-primary" 
+                  :disabled="!store.isConnected || !fileBuffer || !slotAlias || store.isUploading" 
+                  @click="startUpload(fileBuffer, selectedSlot, clkDivider, slotAlias)">
+            Start Upload
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- UPDATED: ADVANCED SYSTEM MANAGEMENT -->
+    <div class="config-card system-card">
+      <div class="card-header"><span class="section-label" style="color: var(--accent);">Advanced System Management</span></div>
+      
+      <!-- Split into two distinct columns -->
+      <div class="advanced-grid">
+        
+        <!-- Column 1: MCU Settings -->
+        <div class="advanced-group">
+          <div class="group-title">MCU Firmware Management</div>
+          <div class="group-buttons">
+            <button class="btn-secondary" @click="showOtaModal = true" :disabled="!store.isConnected">
+              <span class="icon">⚡</span> Update MCU Firmware (OTA)
+            </button>
+            <button class="btn-secondary" @click="sendCommand('SYS:BANK')" :disabled="!store.isConnected">
+              <span class="icon">🔍</span> Check Active Bank
+            </button>
+          </div>
+        </div>
+
+        <!-- Column 2: FPGA Settings -->
+        <div class="advanced-group">
+          <div class="group-title">FPGA / SD Storage Management</div>
+          <div class="group-buttons">
+            <button class="btn-secondary" @click="showSlotZeroModal = true" :disabled="!store.isConnected">
+              <span class="icon">💾</span> Set Default Bitstream (Slot 0)
+            </button>
+            <button class="btn-danger-outline" @click="showWipeModal = true" :disabled="!store.isConnected">
+              <span class="icon">🗑️</span> Format SD Bitstreams
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <!-- MODAL: Set Default Bitstream (Slot 0) -->
+  <div v-if="showSlotZeroModal" class="custom-modal-overlay" @click.self="showSlotZeroModal = false">
+    <div class="custom-modal-card">
+      <div class="modal-header info-header">💾 Set Default Auto-Boot Bitstream</div>
+      <div class="modal-body">
+        <p>This will copy a bitstream into the dedicated auto-boot slot (Slot 0) on the SD Card. This logic will automatically load when the system powers on.</p>
+        <div class="control-group" style="margin-top: 20px;">
+          <label>Source Bitstream</label>
+          <CustomSelect v-model="sourceSlotForZero" :options="allSlotOptions " />
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-text" @click="showSlotZeroModal = false">Cancel</button>
+        <button class="btn-primary" @click="executeSlotZeroUpdate">Set as Auto-Boot</button>
+      </div>
+    </div>
+  </div>
+
+<div v-if="showOtaModal" class="custom-modal-overlay" @click.self="showOtaModal = false">
+    <div class="custom-modal-card ota-modal-card">
+      <div class="modal-header warning-header">⚡ Dual-Bank Firmware Update</div>
+      <div class="modal-body">
+        <p>Upload a new <code>.bin</code> firmware file for the STM32G0 MCU. The system will stage the update in the background and automatically reboot to apply it.</p>
+        
+        <div class="controls-grid" style="margin-top: 20px;">
+          <div class="control-group">
+            <label>Firmware Name</label>
+            <input type="text" v-model="fwName" placeholder="e.g. InkLab Core" maxlength="20" :disabled="store.isUploading || otaSuccess">
+          </div>
+          <div class="control-group">
+            <label>Version</label>
+            <input type="text" v-model="fwVersion" placeholder="e.g. v2.4" maxlength="10" :disabled="store.isUploading || otaSuccess">
+          </div>
+        </div>
+
+        <div class="control-group" style="margin-top: 16px;">
+          <label>Select Firmware File</label>
+          <div class="file-wrapper">
+            <input type="file" id="otaFileInput" accept=".bin" @change="handleOtaFile" style="display:none;" :disabled="store.isUploading || otaSuccess">
+            <label for="otaFileInput" class="file-label" :class="{ disabled: store.isUploading || otaSuccess }">{{ otaFileName }}</label>
+          </div>
+        </div>
+
+        <div v-if="otaTerminalLogs.length > 0" class="mini-terminal">
+          <div 
+            v-for="(log, idx) in visibleOtaLogs" 
+            :key="log.id" 
+            class="mini-log-line"
+            :class="{ 
+              'text-success': log.text.includes('SUCCESS') || log.text.includes('COMPLETE'), 
+              'text-error': log.text.includes('ERR') 
+            }"
+            :style="{ opacity: getOpacity(idx, visibleOtaLogs.length) }"
+          >
+            {{ log.text }}
+          </div>
+        </div>
+
+      </div> <div class="modal-actions">
+        <button class="btn-text" @click="showOtaModal = false">{{ otaSuccess ? 'Close' : 'Cancel' }}</button>
+        <button v-if="!otaSuccess" class="btn-warning" @click="executeOtaUpdate" :disabled="!otaFileBuffer || !fwName || !fwVersion || store.isUploading">Start OTA Update</button>
+        <button v-else class="btn-primary" @click="showOtaModal = false">Finish</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Format SD Card -->
+  <div v-if="showWipeModal" class="custom-modal-overlay" @click.self="showWipeModal = false">
+    <div class="custom-modal-card">
+      <div class="modal-header error-header">⚠️ Wipe SD Bitstreams</div>
+      <div class="modal-body">
+        <p>Are you sure you want to delete all bitstreams (Slots 1-15) from the SD Card? <b>The default auto-boot bitstream (Slot 0) will remain intact.</b></p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-text" @click="showWipeModal = false">Cancel</button>
+        <button class="btn-danger" @click="executeWipeSd">Yes, Wipe SD Card</button>
+      </div>
+    </div>
+  </div>
+
+</template>
+
+<style scoped>
+/* REDUCED GAP TO COMPRESS VERTICAL SPACE */
+.fpga-page { display: flex; flex-direction: column; gap: 16px; padding: 10px; }
+
+.dashboard { 
+  display: grid; grid-template-columns: repeat(4, 1fr); 
+  gap: 1px; background: var(--edge); border: 1px solid var(--edge); border-radius: 8px; overflow: hidden; 
+}
+.stat { background: var(--paper); padding: 12px 16px; text-align: center; } /* REDUCED TOP/BOTTOM PADDING */
+.stat-label { font-size: 0.65rem; color: #64748b; text-transform: uppercase; font-weight: 700; margin-bottom: 4px; }
+.stat-value { font-family: 'Fira Code', monospace; font-size: 1rem; font-weight: 600; }
+
+.config-card, .upload-card {
+  background: white; border: 1px solid var(--edge); border-radius: 12px; padding: 16px; /* REDUCED PADDING */
+  box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+}
+
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; } /* REDUCED MARGIN */
+.section-label { font-weight: 800; font-size: 0.8rem; color: #1e293b; text-transform: uppercase; letter-spacing: 0.05em; display: block; } /* display:block ensures it anchors properly */
+.upload-card .section-label { margin-bottom: 16px; } /* Added since we dropped .card-header wrapper on this one */
+
+.controls-grid { display: grid; grid-template-columns: 1fr 1.5fr 1fr 1fr; gap: 16px; align-items: flex-end; }
+.upload-row { display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 16px; align-items: flex-end; } /* REDUCED GAP */
+
+.control-group { display: flex; flex-direction: column; gap: 8px; }
+label { font-size: 0.75rem; font-weight: 700; color: #64748b; }
+
+select, input[type="text"] {
+  padding: 10px; border-radius: 6px; border: 1px solid var(--edge); background: #f8fafc; font-size: 0.9rem;
+}
+
+.step-input {
+  display: flex; align-items: center; background: #f1f5f9; border-radius: 8px; overflow: hidden; height: 42px;
+  border: 1px solid var(--edge);
+}
+.step-input button {
+  width: 40px; height: 100%; border: none; background: #e2e8f0; color: #475569; font-size: 1.2rem; cursor: pointer;
+}
+.step-input button:hover:not(:disabled) { background: #cbd5e1; }
+.divider-value {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1;
+}
+
+/* --- SEGMENTED CONTROL --- */
+.segmented-control { display: flex; background: var(--edge); border-radius: 8px; padding: 2px; width: 100%; }
+.segmented-control button { flex: 1; border: none; background: transparent; padding: 0; font-size: 0.8rem; color: #64748b; border-radius: 6px; cursor: pointer; transition: 0.2s; font-weight: 700; height: 100%; }
+.segmented-control button.active { background: white; color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+
+.divider-value span { font-weight: 700; font-family: 'Fira Code'; font-size: 0.9rem; }
+.divider-value small { font-size: 0.65rem; color: #94a3b8; }
+
+.w-full { width: 100%; }
+
+button { border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; height: 42px; border: 1px solid var(--edge); font-family: inherit;}
+.btn-primary { background: var(--ink); color: white; border: none; }
+.btn-primary:hover:not(:disabled) { background: #0f172a; }
+.btn-secondary { background: #f1f5f9; color: #475569; }
+.btn-secondary:hover:not(:disabled) { background: #e2e8f0; }
+.btn-warning { background: #f59e0b; color: white; border: none; }
+.btn-warning:hover:not(:disabled) { background: #d97706; }
+
+.file-label { 
+  display: block; padding: 10px; background: #f8fafc; border: 2px dashed #cbd5e1; border-radius: 8px;
+  text-align: center; font-size: 0.85rem; height: 42px; line-height: 20px; color: #64748b; cursor: pointer; transition: 0.2s;
+}
+.file-label:hover:not(.disabled) { background: #f1f5f9; border-color: #94a3b8; }
+.file-label.disabled { opacity: 0.5; cursor: not-allowed; border-style: solid; }
+
+
+/* --- NEW: Advanced System Management Grid --- */
+.system-card { background: #f8fafc; border-style: dashed; }
+
+.advanced-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px; /* REDUCED GAP */
+}
+
+.advanced-group {
+  background: white;
+  padding: 12px 16px; /* REDUCED PADDING */
+  border-radius: 8px;
+  border: 1px solid var(--edge);
+  display: flex;
+  flex-direction: column;
+}
+
+.group-title {
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: #64748b;
+  text-transform: uppercase;
+  margin-bottom: 12px; /* REDUCED MARGIN */
+  border-bottom: 1px solid var(--edge);
+  padding-bottom: 8px;
+  letter-spacing: 0.05em;
+}
+
+.group-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.btn-danger-outline { background: white; color: var(--error); border-color: #fecaca; }
+.btn-danger-outline:hover:not(:disabled) { background: #fef2f2; border-color: #fca5a5; }
+.icon { margin-right: 6px; font-size: 0.9rem; }
+
+/* REUSABLE MODAL CSS */
+.custom-modal-overlay {
+  position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+  background: rgba(15, 23, 42, 0.7); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center; z-index: 10000;
+}
+.custom-modal-card {
+  background: var(--paper);
+  width: 480px; border-radius: 12px;
+  border: 1px solid var(--edge); 
+  box-shadow: 0 10px 25px rgba(0,0,0,0.2); 
+  animation: slideIn 0.2s ease-out;
+}
+
+.ota-modal-card {
+  width: 650px;
+}
+
+.modal-header { padding: 16px 20px; font-weight: 800; font-size: 1.05rem; border-bottom: 1px solid var(--edge); }
+.info-header { background: #eff6ff; color: var(--info); border-bottom-color: #bfdbfe; }
+.warning-header { background: #fffbeb; color: #d97706; border-bottom-color: #fde68a; }
+.error-header { background: #fef2f2; color: var(--error); border-bottom-color: #fecaca; }
+
+.modal-body { padding: 24px 20px; font-size: 0.9rem; color: var(--ink); line-height: 1.5; }
+.modal-body p { margin: 0; }
+.modal-body code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 0.8rem;}
+.modal-actions { display: flex; gap: 12px; padding: 16px 20px; background: var(--ghost); border-top: 1px solid var(--edge); justify-content: flex-end; }
+
+.btn-text { background: transparent; border: none; color: #64748b; font-weight: 600; width: auto; padding: 0 16px; }
+.btn-text:hover { color: var(--ink); background: #f1f5f9; }
+.btn-danger { background: var(--error); color: white; border: none; width: auto; padding: 0 20px; }
+.btn-danger:hover { background: #dc2626; }
+
+.mini-terminal {
+  background: #0f172a;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-top: 20px;
+  font-family: 'Fira Code', monospace;
+  font-size: 0.75rem;
+  height: 130px; 
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end; 
+  border: 1px solid var(--edge);
+  overflow: hidden;
+  box-shadow: inset 0 2px 8px rgba(0,0,0,0.2);
+}
+
+.mini-log-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.5;
+  color: #e2e8f0;
+  transition: opacity 0.3s ease;
+}
+
+.text-success { color: var(--success) !important; font-weight: 700; }
+.text-error { color: var(--error) !important; font-weight: 700; }
+
+@keyframes slideIn {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+</style>
+
+==================================================
+
+- src -> components -> views -> SwTerminal.vue
+
+<script setup>
+import { ref, watch, nextTick, onMounted, onActivated, onUnmounted, computed } from 'vue'
+import { useSystemStore } from '../../stores/systemStore'
+import { useSerial } from '../../composables/useSerial'
+
+const store = useSystemStore()
+const { sendCommand } = useSerial()
+
+const cmd = ref('')
+const outputRef = ref(null)
+const inputRef = ref(null) 
+
+const showTimestamps = ref(true)
+const lineEnding = ref('\n') 
+
+// Command History
+const cmdHistory = ref([])
+const historyIdx = ref(-1)
+
+// --- NEW: Autocomplete State ---
+const searchPrefix = ref('')
+const autoCompleteIdx = ref(-1)
+
+const commandGroups =[
+  {
+    name: 'System Utilities',
+    cmds:[
+      { label: 'SCAN', cmd: 'SCAN', desc: 'Scan SD Card for bitstreams' },
+      { label: 'SETCLK', cmd: 'SETCLK:1:2', desc: 'Apply Clock Divider (Slot:Divider)' },
+      { label: 'SYS:RESET', cmd: 'SYS:RESET', desc: 'Software Reboot the MCU' },
+      { label: 'SYS:SLEEP', cmd: 'SYS:SLEEP:1', desc: 'Enter Active Sleep Mode (1=Sleep, 0=Wake)' },
+      { label: 'TELEM:MUTE', cmd: 'TELEM:MUTE:1', desc: 'Mute JSON Telemetry (1/0)' },
+      { label: 'TELEM:RATE', cmd: 'TELEM:RATE:50', desc: 'Set Telemetry Update Rate (50-5000ms)' },    
+    ]
+  },
+  {
+    name: 'SPI Diagnostics',
+    cmds:[
+      { label: 'SPI:PING', cmd: 'SPI:PING', desc: 'Full-Duplex Ping Test' },
+      { label: 'SPI:ID', cmd: 'SPI:ID', desc: 'Read FPGA/SPI ID' },
+      { label: 'SPI:WR', cmd: 'SPI:WR:00:FF', desc: 'Write Register (Addr:Val)' },
+      { label: 'SPI:RD', cmd: 'SPI:RD:00', desc: 'Read Register (Addr)' },
+      { label: 'SPI:BENCH', cmd: 'SPI:BENCH', desc: '10k Packet DMA Benchmark' },
+      { label: 'SPI:BULK', cmd: 'SPI:BULK', desc: '400KB Bulk DMA Transfer' },
+    ]
+  },
+  {
+    name: 'BQ Power (Basics)',
+    cmds:[
+      { label: 'BQ:STATUS', cmd: 'BQ:STATUS', desc: 'Dump all BQ25798 Registers' },
+      { label: 'BQ:CHG', cmd: 'BQ:CHG:1', desc: 'Enable/Disable Charging (1/0)' },
+      { label: 'BQ:ICHG', cmd: 'BQ:ICHG:1000', desc: 'Set Charge Current (mA)' },
+      { label: 'BQ:IIN', cmd: 'BQ:IIN:2000', desc: 'Set Input Limit (mA)' },
+      { label: 'BQ:VREG', cmd: 'BQ:VREG:8400', desc: 'Set Charge Voltage (mV)' },
+      { label: 'BQ:ITERM', cmd: 'BQ:ITERM:120', desc: 'Set Charge Termination Current (mA)' },
+    ]
+  },
+  {
+    name: 'BQ Power (Advanced)',
+    cmds:[
+      { label: 'BQ:TEST_BACKUP (Unplug)', cmd: 'BQ:TEST_BACKUP:1', desc: '[MACRO] Simulates a power loss safely' },
+      { label: 'BQ:TEST_BACKUP (Restore)', cmd: 'BQ:TEST_BACKUP:0', desc: '[MACRO] Safely transitions back to USB power' },
+      { label: 'BQ:BACKUP', cmd: 'BQ:BACKUP:1', desc: 'Arm/Disarm Auto-Backup Handoff (1/0)' },
+      { label: 'BQ:DIS_IN', cmd: 'BQ:DIS_IN:1', desc: 'Force Disconnect Input MUX (1/0)' },
+      { label: 'BQ:VBUS_OUT', cmd: 'BQ:VBUS_OUT:1', desc: 'Force ACFET1 Closed in OTG (Power VBUS from BAT)' },
+      { label: 'BQ:SHIP', cmd: 'BQ:SHIP:2', desc: 'Enter Ship Mode (Kills Battery Output)' },
+      { label: 'BQ:OTG', cmd: 'BQ:OTG:1', desc: 'Force OTG/Boost Mode ON/OFF (1/0)' },
+      { label: 'BQ:VOTG', cmd: 'BQ:VOTG:5000', desc: 'Set OTG/Backup Output Voltage (mV)' },
+      { label: 'BQ:IOTG', cmd: 'BQ:IOTG:2000', desc: 'Set OTG/Backup Output Current (mA)' },
+      { label: 'BQ:HIZ', cmd: 'BQ:HIZ:1', desc: 'Force High-Z / Stop Switching (1/0)' },
+      { label: 'BQ:VINDPM', cmd: 'BQ:VINDPM:4500', desc: 'Set Input Voltage Drop Limit (mV)' },
+      { label: 'BQ:VSYS', cmd: 'BQ:VSYS:7000', desc: 'Set Min System Voltage (mV)' },
+      { label: 'BQ:PFM_FWD', cmd: 'BQ:PFM_FWD:0', desc: 'Enable/Disable PFM mode for charge (1/0)' },
+      { label: 'BQ:PFM_OTG', cmd: 'BQ:PFM_OTG:0', desc: 'Enable/Disable PFM mode for OTG mode (1/0)' },
+      { label: 'BQ:WD', cmd: 'BQ:WD:0', desc: 'Enable/Disable Hardware Watchdog (1/0)' },
+      { label: 'BQ:EMA', cmd: 'BQ:EMA:0.2', desc: 'Set ADC Filter EMA Coeff (0.1 to 1.0)' },
+      { label: 'BQ:DETECT', cmd: 'BQ:DETECT', desc: 'Force Adapter Auto-Detection to Run' },
+    ]
+  }
+]
+
+const showFilterMenu = ref(false)
+const filterWrapperRef = ref(null)
+
+const closeFilterMenu = (e) => {
+  if (showFilterMenu.value && filterWrapperRef.value && !filterWrapperRef.value.contains(e.target)) {
+    showFilterMenu.value = false
+  }
+}
+
+// --- NEW: Autocomplete Computed Property ---
+const allAvailableCmds = commandGroups.flatMap(group => group.cmds.map(c => c.cmd))
+
+const matchedCmds = computed(() => {
+  if (!searchPrefix.value) return[]
+  return allAvailableCmds.filter(c => c.toUpperCase().startsWith(searchPrefix.value.toUpperCase()))
+})
+
+// --- NEW: Triggered ONLY when user physically types, not when arrows change the value
+const handleInput = (e) => {
+  searchPrefix.value = e.target.value
+  autoCompleteIdx.value = -1 // Reset the cycle index when typing changes
+}
+
+const handleCommandSelect = (event) => {
+  const val = event.target.value
+  if (val) {
+    cmd.value = val
+    searchPrefix.value = val
+    autoCompleteIdx.value = -1
+    inputRef.value?.focus()
+    event.target.value = "" // Reset dropdown visually to the placeholder
+  }
+}
+
+const fillCommand = (cmdText) => {
+  cmd.value = cmdText
+  searchPrefix.value = cmdText
+  autoCompleteIdx.value = -1
+  inputRef.value?.focus()
+}
+
+const onTerminalScroll = (e) => {
+  const { scrollTop, scrollHeight, clientHeight } = e.target
+  store.termAutoScroll = scrollHeight - scrollTop <= clientHeight + 10
+  store.termScrollState = scrollTop
+}
+
+const forceScrollBottom = () => {
+  store.termAutoScroll = true
+  if (outputRef.value) outputRef.value.scrollTop = outputRef.value.scrollHeight
+}
+
+const restoreScroll = async () => {
+  await nextTick()
+  if (outputRef.value) {
+    if (store.termAutoScroll) {
+      outputRef.value.scrollTop = outputRef.value.scrollHeight
+    } else {
+      outputRef.value.scrollTop = store.termScrollState
+    }
+  }
+  inputRef.value?.focus()
+}
+
+onMounted(() => {
+  restoreScroll()
+  document.addEventListener('click', closeFilterMenu)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', closeFilterMenu)
+})
+
+onActivated(restoreScroll)
+
+watch(() => store.logs.length, async () => {
+  if (store.termAutoScroll && outputRef.value) {
+    await nextTick()
+    outputRef.value.scrollTop = outputRef.value.scrollHeight
+  }
+})
+
+const submitCmd = () => {
+  if (!cmd.value.trim() || !store.isConnected) return
+  sendCommand(cmd.value, lineEnding.value)
+  store.addLog(`[TX]  ${cmd.value}`, '#f59e0b')
+  
+  if (cmdHistory.value[cmdHistory.value.length - 1] !== cmd.value) {
+    cmdHistory.value.push(cmd.value)
+  }
+  historyIdx.value = cmdHistory.value.length
+  
+  // Clean up
+  cmd.value = ''
+  searchPrefix.value = ''
+  autoCompleteIdx.value = -1
+}
+
+// --- UPDATED: Smart Arrow Keys ---
+const onUpArrow = () => {
+  if (!searchPrefix.value) {
+    // BEHAVIOR A: Empty Input -> Standard History
+    if (historyIdx.value > 0) {
+      historyIdx.value--
+      cmd.value = cmdHistory.value[historyIdx.value]
+    }
+  } else {
+    // BEHAVIOR B: Has Prefix -> Cycle Autocomplete Matches
+    if (matchedCmds.value.length > 0) {
+      if (autoCompleteIdx.value <= 0) {
+        autoCompleteIdx.value = matchedCmds.value.length - 1 // Wrap to bottom
+      } else {
+        autoCompleteIdx.value--
+      }
+      cmd.value = matchedCmds.value[autoCompleteIdx.value]
+    }
+  }
+}
+
+const onDownArrow = () => {
+  if (!searchPrefix.value) {
+    // BEHAVIOR A: Empty Input -> Standard History
+    if (historyIdx.value < cmdHistory.value.length - 1) {
+      historyIdx.value++
+      cmd.value = cmdHistory.value[historyIdx.value]
+    } else {
+      historyIdx.value = cmdHistory.value.length
+      cmd.value = '' 
+    }
+  } else {
+    // BEHAVIOR B: Has Prefix -> Cycle Autocomplete Matches
+    if (matchedCmds.value.length > 0) {
+      if (autoCompleteIdx.value >= matchedCmds.value.length - 1) {
+        autoCompleteIdx.value = 0 // Wrap to top
+      } else {
+        autoCompleteIdx.value++
+      }
+      cmd.value = matchedCmds.value[autoCompleteIdx.value]
+    }
+  }
+}
+
+const exportLog = () => {
+  if (store.logs.length === 0) return
+  const text = store.logs.map(l => showTimestamps.value ? `[${l.time}] ${l.msg}` : l.msg).join('\n')
+  const blob = new Blob([text], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `inklab_session_${new Date().getTime()}.txt`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+</script>
+
+<template>
+  <div class="sw-page">
+    
+    <div class="header-banner">
+      <div style="flex-grow: 1;">
+        <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+          <span class="section-label" style="border: none; margin: 0; padding: 0;">Interactive IDE Terminal</span>
+          <div class="header-actions">
+            <button class="action-btn" @click="showTimestamps = !showTimestamps" :class="{ 'toggle-active': showTimestamps }">⏱️ Timestamps</button>
+            <button class="action-btn" @click="exportLog" :disabled="store.logs.length === 0">💾 Export</button>
+            <button class="action-btn" @click="store.clearLogs()">🗑️ Clear</button>
+          </div>
+        </div>
+        
+      </div>
+    </div>
+<!-- Replace the old cmd-dropdown and filter-bar with this: -->
+        <div class="toolbar-bottom-row">
+          <select class="cmd-dropdown" @change="handleCommandSelect($event)">
+            <option value="" disabled selected>📦 Quick Command Library...</option>
+            <optgroup v-for="group in commandGroups" :key="group.name" :label="group.name">
+              <option v-for="c in group.cmds" :key="c.cmd" :value="c.cmd">
+                {{ c.label }} &mdash; {{ c.desc }}
+              </option>
+            </optgroup>
+          </select>
+
+          <!-- NEW: Filter Dropdown -->
+          <div class="filter-dropdown-wrapper" ref="filterWrapperRef">
+            <button class="action-btn filter-btn" @click="showFilterMenu = !showFilterMenu" :class="{ 'toggle-active': showFilterMenu }">
+              ⚙️ Filters
+            </button>
+            
+            <div v-if="showFilterMenu" class="filter-menu">
+              <div class="filter-header">Terminal Filters</div>
+              <label v-for="(enabled, type) in store.filterSettings" :key="type" class="filter-menu-item">
+                <input type="checkbox" v-model="store.filterSettings[type]"> 
+                <span class="filter-label-text">{{ type.toUpperCase() }}</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+    <div class="terminal-container">
+      <div class="terminal-hud">
+        <div class="hud-item"><span>STORAGE</span><strong :style="{ color: store.isSdInserted ? 'var(--success)' : 'var(--error)' }">{{ store.isSdInserted ? 'MEDIA OK' : 'NO MEDIA' }}</strong></div>
+        <div class="hud-item">
+          <span>{{ store.bqData.mode === 'OTG' ? 'PMID (BAT)' : 'PMID (USB)' }}</span>
+          <strong>
+            {{ store.bqData.vbusVolt.toFixed(1) }}V / 
+            {{ Math.abs(store.bqData.mode === 'OTG' ? store.bqData.batCurr : store.bqData.vbusCurr).toFixed(0) }}mA
+          </strong>
+        </div>
+        <div class="hud-item"><span>BATTERY</span><strong :style="{ color: store.bqData.soc < 20 ? 'var(--error)' : 'var(--success)' }">{{ store.bqData.soc.toFixed(0) }}%</strong></div>
+        <div class="hud-item"><span>1.2V CORE</span><strong style="color: var(--info)">{{ store.powerData['1v2_core']?.v.toFixed(2) }}V / {{ store.powerData['1v2_core']?.i.toFixed(0) }}mA</strong></div>
+        <div class="hud-item"><span>3.3V FPGA</span><strong style="color: var(--info)">{{ store.powerData['3v3_fpga']?.v.toFixed(2) }}V / {{ store.powerData['3v3_fpga']?.i.toFixed(0) }}mA</strong></div>
+        <div class="hud-item"><span>3.3V MCU</span><strong style="color: var(--info)">{{ store.powerData['3v3_mcu']?.v.toFixed(2) }}V / {{ store.powerData['3v3_mcu']?.i.toFixed(0) }}mA</strong></div>
+        <div class="hud-item"><span>3.3V EXT</span><strong style="color: var(--info)">{{ store.powerData['3v3_ext']?.v.toFixed(2) }}V / {{ store.powerData['3v3_ext']?.i.toFixed(0) }}mA</strong></div>
+        <div class="hud-item"><span>FPGA SLOT</span><strong style="color: #e2e8f0">{{ store.activeSlot !== '--' ? store.activeSlot : 'UNCONFIGURED' }}</strong></div>
+        <div class="hud-item"><span>SYS CLOCK</span><strong :style="{ color: store.clockStatus.includes('PULSING') ? 'var(--info)' : 'var(--warning)' }">{{ store.clockStatus }}</strong></div>
+      </div>
+
+      <div class="term-output" ref="outputRef" @scroll="onTerminalScroll">
+        <div v-if="store.logs.length === 0" class="placeholder">
+          {{ store.isConnected ? `${store.fwName} (${store.fwVersion}) - Terminal Ready.` : 'Connect hardware to begin terminal session...' }}
+        </div>
+       <div v-for="(log, i) in store.logs" :key="i" class="log-line">
+          <span class="time" v-if="showTimestamps">[{{ log.time }}]</span>
+          <span :style="{color: log.color || '#e2e8f0'}"> {{ log.msg }}</span>
+        </div>
+      </div>
+      
+      <div v-if="!store.termAutoScroll" class="scroll-alert" @click="forceScrollBottom">More messages below ↓</div>
+      
+      <div class="term-input-row">
+        <span class="prompt">TX &gt;</span>
+        <input 
+          ref="inputRef"
+          type="text" 
+          v-model="cmd" 
+          @input="handleInput"
+          @keyup.enter="submitCmd"
+          @keydown.up.prevent="onUpArrow"
+          @keydown.down.prevent="onDownArrow"
+          placeholder="Enter command..."
+          :disabled="!store.isConnected"
+          autocomplete="off"
+        />
+        
+        <select v-model="lineEnding" class="line-ending-select">
+          <option :value="''">None</option>
+          <option :value="'\n'">LF</option>
+          <option :value="'\r'">CR</option>
+          <option :value="'\r\n'">CRLF</option>
+        </select>
+
+        <button class="btn-primary" @click="submitCmd" :disabled="!store.isConnected || !cmd">Send</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.sw-page { display: flex; flex-direction: column; gap: 20px; height: 100%; }
+.header-banner { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid var(--edge); padding-bottom: 12px; }
+
+/* --- NEW TOOLBAR ROW --- */
+.toolbar-bottom-row {
+  display: flex;
+  gap: 12px;
+  align-items: stretch; /* Forces children to match heights */
+  height: 38px;         /* Fixed height for perfect alignment */
+}
+
+.cmd-dropdown {
+  flex-grow: 1; 
+  width: 100%;
+  max-width: 400px;
+  padding: 0 14px;
+  border-radius: 8px;
+  background: var(--ghost);
+  border: 1px solid var(--edge);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.cmd-dropdown:focus { border-color: var(--info); }
+.cmd-dropdown optgroup { font-weight: 800; color: var(--accent); }
+.cmd-dropdown option { font-weight: 500; color: var(--ink); font-family: 'Fira Code', monospace; }
+
+/* --- FILTER DROPDOWN --- */
+.filter-dropdown-wrapper {
+  position: relative;
+  height: 100%;
+}
+
+.filter-btn {
+  height: 100%;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+}
+
+.filter-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  background: var(--paper);
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+  width: 180px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.filter-header {
+  padding: 10px 12px;
+  background: var(--ghost);
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: var(--accent);
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--edge);
+}
+
+.filter-menu-item {
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.filter-menu-item:hover {
+  background: #f1f5f9;
+}
+
+.filter-label-text {
+  margin-top: 2px; /* Visual alignment fix for checkboxes */
+}
+
+/* --- TERMINAL ACTIONS --- */
+.header-actions { display: flex; gap: 8px; }
+.action-btn { width: auto; padding: 6px 12px; font-size: 0.75rem; background: var(--paper); color: var(--ink); border: 1px solid var(--edge); transition: all 0.2s; cursor: pointer; border-radius: 6px; font-weight: 600; }
+.action-btn:hover:not(:disabled) { background: #f1f5f9; }
+.action-btn.toggle-active { color: var(--info); border-color: var(--info); background: #eff6ff; }
+.action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* --- TERMINAL HUD & CONTAINER --- */
+.terminal-container { position: relative; display: flex; flex-direction: column; flex-grow: 1; background: #0f172a; border-radius: 8px; overflow: hidden; border: 1px solid var(--edge); min-height: 400px; }
+.terminal-hud { display: grid; grid-template-columns: repeat(9, 1fr); background: #0b1120; border-bottom: 1px solid #1e293b; }
+.hud-item { padding: 12px 10px; display: flex; flex-direction: column; border-right: 1px solid #1e293b; justify-content: center; }
+.hud-item:last-child { border-right: none; }
+.hud-item span { font-size: 0.55rem; color: #64748b; text-transform: uppercase; font-weight: 800; margin-bottom: 4px; letter-spacing: 0.05em; white-space: nowrap; }
+.hud-item strong { font-family: 'Fira Code', monospace; font-size: 0.75rem; color: var(--success); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* --- TERMINAL OUTPUT --- */
+.term-output { flex-grow: 1; padding: 16px; overflow-y: auto; font-family: 'Fira Code', monospace; font-size: 0.85rem; line-height: 1.5; color: #e2e8f0; display: flex; flex-direction: column; white-space: pre-wrap; scrollbar-width: thin; scrollbar-color: #334155 #0f172a; }
+.placeholder { color: #64748b; font-style: italic; }
+.log-line .time { color: #64748b; margin-right: 8px; }
+.scroll-alert { position: absolute; bottom: 80px; right: 20px; background: rgba(30, 41, 59, 0.9); color: #93c5fd; border: 1px solid #3b82f6; padding: 8px 16px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; cursor: pointer; backdrop-filter: blur(4px); box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: background 0.2s; z-index: 10; }
+.scroll-alert:hover { background: #1e293b; color: #bfdbfe; }
+
+/* --- TERMINAL INPUT BAR --- */
+.term-input-row { display: flex; align-items: center; padding: 12px; background: #1e293b; gap: 12px; border-top: 1px solid #334155; }
+.prompt { color: var(--info); font-family: 'Fira Code', monospace; font-weight: 700; font-size: 0.9rem; }
+input[type="text"] { flex-grow: 1; background: #0f172a; border: 1px solid #334155; color: #e2e8f0; font-family: 'Fira Code', monospace; padding: 10px 16px; border-radius: 6px; outline: none; font-size: 0.85rem; }
+input[type="text"]:focus { border-color: var(--info); }
+input[type="text"]:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.line-ending-select { background: #0f172a; color: #94a3b8; border: 1px solid #334155; padding: 10px; border-radius: 6px; font-family: 'Fira Code', monospace; font-size: 0.8rem; font-weight: 600; outline: none; cursor: pointer; }
+.line-ending-select:focus { border-color: var(--info); }
+
+.btn-primary { background: var(--info); color: white; border: none; padding: 10px 24px; border-radius: 6px; font-weight: 600; cursor: pointer; transition: 0.2s; width: auto; }
+.btn-primary:hover:not(:disabled) { background: #2563eb; }
+.btn-primary:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+</style>
+
+==================================================
+
+- src -> composables -> useSerial.js
+
+import { ref } from 'vue'
+import { useSystemStore } from '../stores/systemStore'
+
+let port = null
+let writer = null
+let fileBuffer = null
+let bytesSent = 0
+let totalBytes = 0
+let uploadStartTime = 0
+
+// NEW: Global resolver for awaiting the BQ dump
+let snapshotResolver = null;
+
+export function useSerial() {
+  const store = useSystemStore()
+
+  // Wrapper to convert the asynchronous JSON event into a Promise
+  const waitForSnapshotResponse = () => {
+    return new Promise((resolve) => {
+      snapshotResolver = resolve;
+      setTimeout(() => {
+        if (snapshotResolver === resolve) {
+          snapshotResolver = null;
+          resolve(null); // Resolve null on timeout
+        }
+      }, 150); 
+    });
+  };
+
+  async function attemptAutoConnect() {
+    if (!navigator.serial) return;
+    try {
+      const ports = await navigator.serial.getPorts();
+      if (ports.length > 0) {
+        port = ports[0];
+        if (port.readable || port.writable) return;
+        
+        await openPort(true); // <--- Pass true here
+        // Removed the store.addLog from here!
+      }
+    } catch (e) {
+      console.error("Auto-connect failed:", e);
+    }
+  }
+
+    async function openPort(isAuto = false) {
+    await port.open({ baudRate: 115200 });
+    store.isConnected = true;
+    
+    // Clear the terminal on every fresh connection
+    store.clearLogs();
+    
+    // Log the connection immediately after clearing!
+    if (isAuto) {
+      store.addLog("Auto-reconnected to hardware.", "var(--info)");
+    }
+
+    // Reset safety states
+    store.sdWarningDismissed = false;
+    store.showSdWarning = false;
+
+    // Listen for MCU reset/unplug
+    port.addEventListener('disconnect', () => {
+      store.isConnected = false;
+      store.addLog("Hardware disconnected (MCU Reset).", "var(--warning)");
+    });
+
+    // FIX: Start readLoop FIRST so the port is actively pulling data 
+    // before we start awaiting the handshake!
+    readLoop();
+
+    // Handshake loop
+    const verifyPower = async () => {
+      for (let i = 0; i < 20; i++) {
+        // The store's processIncomingData normally logs everything.
+        // We want this specific handshake to be silent.
+        await write(new TextEncoder().encode('BQ:STATUS\n')); 
+        const dump = await waitForSnapshotResponse();
+
+        if (dump && dump.regs && dump.regs.length > 0x1C) {
+          const reg1B = dump.regs[0x1B]; // REG1B_Charger_Status_0
+          const reg1C = dump.regs[0x1C]; // REG1C_Charger_Status_1
+
+          const vbusPresent = (reg1B & 0x01) !== 0; // Bit 0: VBUS_PRESENT_STAT
+          const vbusStat = (reg1C >> 1) & 0x0F;     // Bits 4:1: VBUS_STAT_3:0
+
+          // Check if VBUS is physically present and NOT in Backup Mode (0x0C/12)
+          if (vbusPresent && vbusStat !== 12) {
+            store.addLog("Hardware Linked: Power rails stable.", "var(--success)");
+            return true;
+          }
+        }
+        await new Promise(r => setTimeout(r, 50));
+      }
+      return false;
+    };
+
+    const isStable = await verifyPower();
+    
+    // Give the MCU a tiny breather after the heavy BQ polling
+    await new Promise(r => setTimeout(r, 20));
+
+    // Space out the initialization commands so the MCU buffer doesn't drop them
+    await scanSlots(); 
+    await new Promise(r => setTimeout(r, 20));
+    
+    await sendCommand("GET_SLOT");
+    await new Promise(r => setTimeout(r, 20));
+    
+    await sendCommand("SYS:GET_FW_INFO"); // This will now successfully return your firmware version!
+    await new Promise(r => setTimeout(r, 20));
+    
+    await sendCommand("IO:STATUS");
+
+
+
+    if (isStable) {
+      sendCommand(store.isSleeping ? 'SYS:SLEEP:1' : 'SYS:SLEEP:0');
+    }
+  }
+
+  async function connect() {
+    try {
+      port = await navigator.serial.requestPort();
+      await openPort(false);
+      store.addLog("Serial link established.", "var(--success)");
+    } catch (err) {
+      store.addLog("ERR: Connection failed.", "var(--error)");
+    }
+  }
+
+  async function write(data) {
+    if (!port || !port.writable) return;
+    writer = port.writable.getWriter();
+    await writer.write(data);
+    writer.releaseLock();
+  }
+
+async function sendCommand(cmd, ending = '\n') {
+    if (store.isUploading) return;
+    await write(new TextEncoder().encode(cmd + ending));
+
+    if (cmd.startsWith('BQ:') && !cmd.startsWith('BQ:STATUS')) {
+      setTimeout(() => write(new TextEncoder().encode('BQ:STATUS\n')), 150);
+    }
+  }
+
+  async function scanSlots() { await sendCommand("SCAN"); }
+
+  async function startUpload(buffer, targetSlot, clkDivider, slotName) {
+    fileBuffer = buffer;
+    totalBytes = buffer.length;
+    bytesSent = 0;
+    store.isUploading = true;
+    store.uploadProgress = 0;
+    uploadStartTime = performance.now();
+    
+    const safeName = slotName.trim().replace(/[:\s]/g, '_');
+    const cmd = `START:${targetSlot}:${totalBytes}:${clkDivider}:${safeName}\n`;
+    await write(new TextEncoder().encode(cmd));
+  }
+
+  async function sendNextChunk() {
+    if (bytesSent >= totalBytes) return;
+    const chunk = fileBuffer.slice(bytesSent, bytesSent + 8192); 
+    await write(chunk);
+    bytesSent += chunk.length;
+    
+    store.uploadProgress = Math.floor((bytesSent / totalBytes) * 100);
+    const elapsed = (performance.now() - uploadStartTime) / 1000;
+    store.transferSpeed = ((bytesSent / 1024) / elapsed).toFixed(1) + ' KB/s';
+  }
+
+  async function readLoop() {
+    const textDecoder = new TextDecoderStream();
+    const readableStreamClosed = port.readable.pipeTo(textDecoder.writable);
+    const reader = textDecoder.readable.getReader();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+
+        // Split by newline. The last element is either an empty string (if it ended exactly on \n)
+        // or an incomplete JSON/text string. We pop it off and keep it in the buffer for the next chunk.
+        let lines = buffer.split('\n');
+        buffer = lines.pop();
+        
+        for (let line of lines) {
+          const clean = line.trim();
+          if (!clean) continue;
+          
+          if (clean === "ACK_START" || clean === "ACK_CHUNK") {
+            await sendNextChunk();
+          } else if (clean === "ACK_DONE") {
+            store.isUploading = false;
+            store.addLog("Transfer complete.", "var(--success)");
+            await scanSlots(); 
+
+          // --- REPLACE THE ERROR BLOCK WITH THIS ---
+          } else if (clean === "ERR_TIMEOUT") {
+            store.isUploading = false;
+            store.addLog("Upload Aborted: Timeout", "var(--error)");
+            
+          } else if (clean.startsWith("ERR:")) {
+            // Only flag as an upload abort if an upload was actively running
+            if (store.isUploading) {
+              store.isUploading = false;
+              store.addLog("Upload Aborted: " + clean, "var(--error)");
+            } else {
+              // Otherwise, just print the error normally
+              store.addLog(clean, "var(--error)");
+            }
+          // -----------------------------------------
+
+          }
+          // Direct oscilloscope pass-through
+          else if (clean.startsWith('{"t":"f"')) {
+              try {
+                  const fastData = JSON.parse(clean);
+                  window.dispatchEvent(new CustomEvent('fast-telemetry', { detail: fastData }));
+              } catch(e) {}
+          }
+          // JSON Processing Block
+          else if (clean.startsWith('{')) {
+              try {
+                  const data = JSON.parse(clean);
+                  // Intercept the dump for the handshake promise
+                  if (data.type === 'bq_dump' && snapshotResolver) {
+                      snapshotResolver(data);
+                      snapshotResolver = null;
+                  }
+                  // Still forward to the Pinia store to update state/faults/raw metrics
+                  store.processIncomingData(clean);
+              } catch(e) {}
+          }
+          else {
+            store.processIncomingData(clean);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Read loop error:", err);
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
+  if (navigator.serial) {
+    navigator.serial.addEventListener('connect', (e) => {
+      setTimeout(() => attemptAutoConnect(), 500);
+    });
+  }
+
+  return { connect, sendCommand, startUpload, scanSlots, attemptAutoConnect }
+}
+
+==================================================
+
+- src -> stores -> systemStore.js
+
+import { defineStore } from 'pinia'
+
+// Helper to decode BQ Faults from REG20 and REG21
+function decodeBQFaults(f0, f1) {
+  const faults = []
+  if (f0 & (1 << 7)) faults.push('IBAT Regulation Mode')
+  if (f0 & (1 << 6)) faults.push('VBUS Over-Voltage')
+  if (f0 & (1 << 5)) faults.push('VBAT Over-Voltage')
+  if (f0 & (1 << 4)) faults.push('IBUS Over-Current')
+  if (f0 & (1 << 3)) faults.push('IBAT Over-Current')
+  if (f0 & (1 << 2)) faults.push('Converter Over-Current')
+  if (f0 & (1 << 1)) faults.push('VAC2 Over-Voltage')
+  if (f0 & (1 << 0)) faults.push('VAC1 Over-Voltage')
+  if (f1 & (1 << 7)) faults.push('SYS Short Circuit')
+  if (f1 & (1 << 6)) faults.push('SYS Over-Voltage')
+  if (f1 & (1 << 5)) faults.push('OTG Over-Voltage')
+  if (f1 & (1 << 4)) faults.push('OTG Under-Voltage')
+  if (f1 & (1 << 2)) faults.push('Thermal Shutdown')
+  return faults
+}
+
+const ERROR_CODES = {
+  0: "ERR_NONE",
+  1: "ERR_SD_MOUNT_FAIL",
+  2: "ERR_SD_FILE_NOT_FOUND",
+  3: "ERR_FPGA_PROGRAM_TIMEOUT",
+  4: "ERR_FPGA_DONE_LOW",
+  5: "ERR_I2C_BUS_STUCK",
+  6: "ERR_BQ25798_FAULT",
+  7: "ERR_SPI_DMA_TIMEOUT"
+};
+
+// Dictionary of handlers for incoming JSON telemetry. 
+// Keys map to the "type" field emitted by the hardware MCU.
+const telemetryHandlers = {
+  'ina': (data, state) => {
+    const rail = state.powerData[data.id]
+    if (!rail) return
+    const pwr = data.p || 0
+    rail.v = data.v || 0
+    rail.i = data.i || 0
+    rail.pwr = pwr
+    rail.ema = rail.ema === 0 ? pwr : (pwr * 0.7) + (rail.ema * 0.3)
+    if (pwr > rail.peak) rail.peak = pwr
+    if (pwr < rail.min) rail.min = pwr
+  },
+    'adc_res': (data, state) => {
+    state.addLog(`ADC Measurement: ${data.v.toFixed(3)} V`, 'var(--warning)')
+    window.dispatchEvent(new CustomEvent('adc-update', { detail: data.v }))
+  },
+'bq_dump': (data, state) => {
+    state.bqData.rawRegs = data.regs;
+    if (data.rearm !== undefined) state.bqData.autoRearm = data.rearm;
+    if (data.ema !== undefined) state.bqData.ema = data.ema;
+  },
+  'bq': (data, state) => {
+    state.bqData.vbusVolt = data.vbus
+    state.bqData.vbusCurr = data.ibus
+    state.bqData.vbusPwr = data.vbus_pwr
+    state.bqData.batVolt = data.vbat
+    state.bqData.batCurr = data.ibat
+    state.bqData.batPwr = data.pwr
+    state.bqData.mode = data.stat
+    state.bqData.fault0 = data.flt0
+    state.bqData.fault1 = data.flt1
+    state.bqData.soc = data.soc || 0 
+
+    // Extract faults and trigger notifications for NEW faults
+    const newFaults = decodeBQFaults(data.flt0, data.flt1)
+    newFaults.forEach(fault => {
+      if (!state.activeFaults.includes(fault)) {
+        state.addNotification(`Hardware Alert: ${fault}`, 'error')
+      }
+    })
+    state.activeFaults = newFaults
+  },
+    'sys_err': (data, state) => {
+    const severities = ['INFO', 'WARNING', 'CRITICAL', 'FATAL'];
+    const sevStr = severities[data.sev] || 'UNKNOWN';
+    const codeStr = ERROR_CODES[data.code] || `CODE_${data.code}`;
+    
+    // Determine Terminal Text Color
+    const logColor = data.sev >= 2 ? 'var(--error)' : (data.sev === 1 ? 'var(--warning)' : 'var(--info)');
+    
+    // Determine Toast UI Type
+    const toastType = data.sev >= 2 ? 'error' : (data.sev === 1 ? 'warning' : 'info');
+
+    const fullMsg = `[${sevStr}] ${codeStr}: ${data.msg}`;
+    
+    // 1. Post to the terminal log history
+    state.addLog(fullMsg, logColor);
+    
+    // 2. Pop a toast notification for anything WARNING or above
+    if (data.sev >= 1) {
+      state.addNotification(fullMsg, toastType);
+    }
+  },
+  'io': (data, state) => {
+    state.ioData.w = data.w; state.ioData.a = data.a; state.ioData.s = data.s; state.ioData.d = data.d; state.ioData.c = data.c
+  },
+  'io_stat': (data, state) => {
+    state.ledState.r = data.r; state.ledState.g = data.g; state.ledState.b = data.b;
+    state.ledState.muted = data.m === 1;
+    state.joyMap.ud = data.ud; state.joyMap.lr = data.lr; state.joyMap.cen = data.cen;
+  },
+'spi': (data, state) => {
+    state.spiData.lastCmd = '0x' + data.cmd.toString(16).toUpperCase().padStart(2, '0')
+    state.spiData.payload0 = '0x' + data.p0.toString(16).toUpperCase().padStart(2, '0')
+    state.spiData.payload1 = '0x' + data.p1.toString(16).toUpperCase().padStart(2, '0')
+    state.spiData.rxCount++
+
+    if (data.cmd === 0x07) {
+      state.fpgaGpio.states = (data.p0 << 8) | data.p1;
+    }
+    if (data.cmd === 0x09) {
+      state.ramExplorer.lastAddr = data.p0.toString(16).padStart(2, '0') + data.p1.toString(16).padStart(2, '0');
+      state.ramExplorer.lastVal = data.p2.toString(16).toUpperCase().padStart(2, '0');
+      state.ramExplorer.history.unshift({ addr: state.ramExplorer.lastAddr, val: state.ramExplorer.lastVal });
+      if(state.ramExplorer.history.length > 10) state.ramExplorer.history.pop();
+    }
+    
+    // ---> ADD THIS BLOCK TO FIX THE UART TERMINAL OUTPUT <---
+    if (data.cmd === 0x0B) {
+      if (data.p0 === 0) {
+         state.addLog(`SPI FIFO Read: Empty (0x00)`, 'var(--warning)');
+      } else {
+         const charStr = String.fromCharCode(data.p0);
+         state.addLog(`SPI FIFO Read: 0x${data.p0.toString(16).padStart(2,'0').toUpperCase()} (ASCII: '${charStr}')`, 'var(--success)');
+      }
+    }
+    // ---------------------------------------------------------
+  },
+  'sys': (data, state) => {
+    state.isSdInserted = data.sd === 1
+    state.hasReceivedSysTelem = true
+    if (!state.isSdInserted && !state.sdWarningDismissed) {
+      state.showSdWarning = true
+    } else if (state.isSdInserted) {
+      state.showSdWarning = false
+      state.sdWarningDismissed = false 
+    }
+  },
+  'mcu_gpio': (data, state) => {
+    // Copy the JSON data into our state, removing the "type" key
+    const cleanData = { ...data };
+    delete cleanData.type;
+    state.mcuGpioInputs = cleanData;
+  }
+}
+
+export const useSystemStore = defineStore('system', {
+  state: () => ({
+    appMode: 'CONFIG', // Default mode
+    availableTabs: {
+      CONFIG: [
+        { id: 'FpgaConfig', label: 'Programmer' },
+        { id: 'PowerDashboard', label: 'Power Profiler' },
+        { id: 'JoystickView', label: 'Device IO' },
+        { id: 'PinoutConfig', label: 'Pinout & Routing' } 
+      ],
+      DEBUG: [
+        { id: 'SwTerminal', label: 'Terminal' },
+        { id: 'SpiTester', label: 'SPI DMA Tester' },
+        { id: 'AutomationBench', label: 'JS Automation' },
+        { id: 'SignalGenerator', label: 'Signal Gen' }
+      ],
+      APP: [
+        { id: 'AlgorithmDashboard', label: 'Analysis' },
+        { id: 'PatientProfile', label: 'Patient' }
+      ]
+    },
+    fwName: 'InkLab OS',
+    fwVersion: 'v1.0',
+    isConnected: false,
+    isUploading: false,
+    logs:[],
+    diagSequence: { text: '', count: 0 },
+    
+    transferSpeed: '0.0 KB/s', uploadProgress: 0, activeSlot: '--', clockStatus: 'IDLE',
+    
+    sdData: { status: 'IDLE', capacity: '--', free: '--', health: '--', fatWrite: '--', fatRead: '--', usbUplink: '--', usbDownlink: '--' },
+    
+    powerData: {
+      '1v2_core': { title: '1.2V Core', v: 0, i: 0, pwr: 0, ema: 0, min: 99999, peak: 0 },
+      '3v3_ext':  { title: '3.3V Ext', v: 0, i: 0, pwr: 0, ema: 0, min: 99999, peak: 0 },
+      '3v3_fpga': { title: '3.3V FPGA', v: 0, i: 0, pwr: 0, ema: 0, min: 99999, peak: 0 },
+      '3v3_mcu':  { title: '3.3V MCU', v: 0, i: 0, pwr: 0, ema: 0, min: 99999, peak: 0 }
+    },
+    
+    activeFaults: [],
+
+    slotAliases: Array(16).fill('unconfigured'),
+    isSdInserted: false,
+    joyMap: { ud: 0, lr: 0, cen: 0 },
+    ioData: { w: 1, a: 1, s: 1, d: 1, c: 1 },
+    mcuGpioInputs: {},
+    ledState: { r: 50, g: 100, b: 100, muted: false },
+    fpgaLedState: { r: 25, g: 10, b: 10, muted: false }, // <-- ADD THIS
+    spiData: { lastCmd: '--', payload0: '--', payload1: '--', rxCount: 0 },
+    
+    sidebarScrollState: 0, sidebarAutoScroll: true, termScrollState: 0, termAutoScroll: true,
+    hasReceivedSysTelem: false, showSdWarning: false, sdWarningDismissed: false, sysMode: 'ACTIVE', 
+    showDiagnosticModal: false, 
+    bqData: { vbusVolt: 0, vbusCurr: 0, vbusPwr: 0, batVolt: 0, batCurr: 0, batPwr: 0, mode: '--', fault0: 0, fault1: 0, soc: 0, rawRegs:[], autoRearm: 1, ema: 0.2 },
+    lastProgrammedSlot: '--',
+
+    // Notifications State
+    notifications: [],
+    toastIdCounter: 0,
+    fpgaGpio: {
+      dir: 0x0000,   // 16-bit mask (1=Out, 0=In)
+      states: 0x0000 // 16-bit mask (High/Low)
+    },
+    ramExplorer: {
+      lastAddr: '0000',
+      lastVal: '00',
+      history: [] // Last 10 reads
+    },
+filterSettings: {
+      ina: false, // Default: Hide them so you see the terminal clean
+      bq: false,
+      sys: false,
+      spi: true,
+      log: true,
+      mcu_gpio: true
+    }
+  }),
+  getters: {
+    isSleeping: (state) => state.sysMode === 'STANDBY',
+    
+    // NEW: Dynamically grab the active array based on current mode
+    currentTabsArray: (state) => {
+      const tabs = state.availableTabs[state.appMode]
+      return tabs ? tabs.map(tab => tab.id) : []
+    }
+  },
+  actions: {
+    clearLogs() {
+      this.logs = []
+      this.diagSequence = { text: '', count: 0 }
+    },
+addLog(msg, color = null, type = 'log') {
+  // Check if we should ignore this based on filter settings
+  if (this.filterSettings[type] === false) return; 
+
+  const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  
+  // CHANGE THIS LINE: Drop the limit from 3000 to 100
+  if (this.logs.length >= 100) this.logs.shift();
+  
+  this.logs.push({ time, msg, color, type });
+  this.diagSequence = { text: msg, count: this.diagSequence.count + 1 };
+},
+    
+    // New global notification dispatcher
+    addNotification(msg, type = 'info') {
+      const id = this.toastIdCounter++
+      this.notifications.push({ id, msg, type })
+      setTimeout(() => {
+        this.notifications = this.notifications.filter(n => n.id !== id)
+      }, 6000)
+    },
+
+    resetPowerMetrics() {
+      for (const key in this.powerData) {
+        this.powerData[key].ema = 0; this.powerData[key].min = 99999; this.powerData[key].peak = 0
+      }
+    },
+
+    processIncomingData(line) {
+      if (line.startsWith('{')) {
+        try {
+          const data = JSON.parse(line)
+          if (telemetryHandlers[data.type]) {
+            telemetryHandlers[data.type](data, this)
+            
+            // --- NEW: Map raw hardware JSON types to your UI filter categories ---
+            let filterCategory = data.type;
+            if (data.type === 'bq_dump') filterCategory = 'bq';
+            if (data.type === 'io_stat' || data.type === 'io') filterCategory = 'sys'; // or map to 'mcu_gpio'
+            if (data.type === 'adc_res') filterCategory = 'log'; 
+            // ---------------------------------------------------------------------
+
+            // Now log it using the mapped category
+            this.addLog(line, '#94a3b8', filterCategory);
+          }
+        } catch (e) { }
+        return
+      }
+      if (line.startsWith('LAST_SLOT:')) {
+        const slot = line.split(':')[1];
+        this.lastProgrammedSlot = slot;
+        if (slot !== 'NONE') {
+          this.addLog(`Recovered last active slot from MCU SRAM: ${slot}`, 'var(--info)');
+        }
+        return;
+      }
+      if (line.startsWith('FW_INFO:')) {
+        const parts = line.split(':');
+        if (parts.length >= 3) {
+          this.fwName = parts[1];
+          this.fwVersion = parts[2];
+        }
+        return;
+      }
+
+      if (line.startsWith('BENCH_RES:JS_END:')) {
+        window.dispatchEvent(new CustomEvent('bench-js-done'));
+        return;
+      }
+
+      if (line.startsWith('BENCH_RES:MCU:')) {
+        const timeMs = parseInt(line.split(':')[2]);
+        window.dispatchEvent(new CustomEvent('bench-mcu-done', { detail: timeMs }));
+        return;
+      }
+
+      // ADD THIS NEW BLOCK:
+      if (line.startsWith('BENCH_RES:MACRO:')) {
+        const timeMs = parseInt(line.split(':')[2]);
+        window.dispatchEvent(new CustomEvent('bench-macro-done', { detail: timeMs }));
+        return;
+      }
+      
+      if (line.startsWith('LIVE_CLK:')) {
+        const parts = line.split(':')
+        this.activeSlot = `${parts[3] || 'Unnamed'} (${parts[1].padStart(2, '0')})`
+        this.clockStatus = parts[2]
+      } else {
+        if (line.includes("LOG: SD Slot scan complete.")) return; 
+
+        let isMuted = false
+        if (this.sdData.status === 'RUNNING' || this.sdData.status === 'DOWNLINKING') {
+          isMuted = true
+          this.diagSequence = { text: line, count: this.diagSequence.count + 1 }
+        }
+
+        if (line.includes('CAPACITY:')) {
+          const m = line.match(/CAPACITY:\s+(\d+)\s+MB Total,\s+(\d+)\s+MB Free/)
+          if (m) { this.sdData.capacity = m[1] + ' MB'; this.sdData.free = m[2] + ' MB' }
+        } else if (line.includes('WRITE: OK')) { this.sdData.health = 'Write OK'
+        } else if (line.includes('READ: OK')) { this.sdData.health += ' / Read OK'
+        } else if (line.includes('Write Speed:')) {
+          const m = line.match(/Write Speed:\s+([\d.]+)\s+KB\/s/)
+          if (m) this.sdData.fatWrite = m[1] + ' KB/s'
+        } else if (line.includes('Read Speed :')) {
+          const m = line.match(/Read Speed :\s+([\d.]+)\s+KB\/s/)
+          if (m) this.sdData.fatRead = m[1] + ' KB/s'
+        } else if (line.match(/^Speed :\s+([\d.]+)\s+KB\/s/)) { 
+          const m = line.match(/^Speed :\s+([\d.]+)\s+KB\/s/)
+          if (m) this.sdData.usbUplink = m[1] + ' KB/s'
+        }
+
+        if (line.startsWith('SLOT_NAME:')) {
+          const parts = line.split(':');
+          const slotIdx = parseInt(parts[1]);
+          if (!isNaN(slotIdx)) this.slotAliases[slotIdx] = parts[2];
+          return;
+        }
+        if (!isMuted || line.startsWith('ERR:')) this.addLog(line)
+      }
+    }
+  }
+})
+
+==================================================
+

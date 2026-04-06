@@ -1,0 +1,60 @@
+# -----------------------------------------------------------------------------
+# PCF file for InkLab PCB (ICE40UP5K-SG48ITR)
+# -----------------------------------------------------------------------------
+
+# --- EPD Data Bus ---
+set_io EPD_D0       43
+set_io EPD_D1       35
+set_io EPD_D2       44
+set_io EPD_D3       36
+set_io EPD_D4       45
+set_io EPD_D5       37
+set_io EPD_D6       46
+set_io EPD_D7       38
+
+# --- EPD Control Signals ---
+set_io EPD_XCL      31
+set_io EPD_LEH      42
+set_io EPD_MODE     47
+set_io EPD_CKV      2
+set_io EPD_XSTL     34
+set_io EPD_OE       32
+set_io EPD_STV      48
+
+# --- LED / RGB Open Drain Pins ---
+# EPD_LED          39
+
+# --- FPGA RGB LED ---
+set_io RGB0   39
+set_io RGB1   40
+set_io RGB2   41
+
+# --- SPI Interface (connected to MCU) ---
+set_io SPI_MISO     14
+set_io SPI_MOSI     17
+set_io SPI_CS       16
+set_io SPI_SCK      15
+
+# --- Input clock ---
+set_io MCU_CLK     20
+
+# --- External Connector (J1) ---
+# CON_01 is +3V3
+set_io CON_02       3
+set_io CON_03       4
+set_io CON_04       6
+set_io CON_05       9
+set_io CON_06       10
+set_io CON_07       11
+set_io CON_08       12
+set_io CON_09       13
+set_io CON_10       28
+set_io CON_11       27
+set_io CON_12       19
+set_io CON_13       18
+set_io CON_14       21
+set_io CON_15       23
+set_io CON_16       25
+set_io CON_17       26
+# CON_18 is GND
+
