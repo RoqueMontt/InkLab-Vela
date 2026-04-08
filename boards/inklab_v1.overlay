@@ -1,15 +1,187 @@
+// boards/inklab_v1.overlay
+// Target: STM32G0B1CEUx on InkLab v1 PCB
+#include <zephyr/dt-bindings/dma/stm32_dma.h>
+
 / {
+
+    chosen {
+        /* Intentionally empty! We are handling USB manually now. */
+    };
     aliases {
-        /* Links the code alias "led0" to our custom hardware node below */
-        led0 = &my_rgb_red;
+        led0 = &led_r;
+        led1 = &led_g;
+        led2 = &led_b;
+        joy-up = &joy_up;
+        joy-down = &joy_down;
+        joy-left = &joy_left;
+        joy-right = &joy_right;
+        joy-center = &joy_center;
+        gpio-pb11 = &gpio_out_pb11; 
     };
 
     leds {
         compatible = "gpio-leds";
-        my_rgb_red: led_red {
-            /* GPIOC, Pin 15. ACTIVE_LOW handles the Common Anode inversion automatically! */
-            gpios = <&gpioc 15 GPIO_ACTIVE_LOW>;
-            label = "RGB LED 0 (Red)";
+        led_b: led_b { gpios = <&gpioc 13 GPIO_ACTIVE_LOW>; label = "LED_RGB2"; };
+        led_g: led_g { gpios = <&gpioc 14 GPIO_ACTIVE_LOW>; label = "LED_RGB1"; };
+        led_r: led_r { gpios = <&gpioc 15 GPIO_ACTIVE_LOW>; label = "LED_RGB0"; };
+    };
+
+    joystick {
+        compatible = "gpio-keys";
+        joy_left: button_0 { gpios = <&gpioc 7 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_A"; };
+        joy_up: button_1 { gpios = <&gpiod 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_B"; };
+        joy_down: button_2 { gpios = <&gpiob 8 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_C"; };
+        joy_right: button_3 { gpios = <&gpiob 9 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_D"; };
+        joy_center: button_4 { gpios = <&gpiod 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_CEN"; };
+    };
+
+    sys_ctrl {
+        compatible = "gpio-keys";
+        fpga_rst: fpga_rst { gpios = <&gpiod 0 GPIO_ACTIVE_HIGH>; };
+        fpga_ndone: fpga_ndone { gpios = <&gpioa 15 GPIO_ACTIVE_HIGH>; };
+        sd_det: sd_det { gpios = <&gpioa 2 GPIO_ACTIVE_LOW>; };
+        pwr_en: pwr_en { gpios = <&gpiob 13 GPIO_ACTIVE_HIGH>; };
+        wkp: wkp { gpios = <&gpiob 14 GPIO_ACTIVE_HIGH>; };
+        pg: pg { gpios = <&gpiob 12 GPIO_ACTIVE_HIGH>; };
+        gpio_out_pb11: gpio_out1 { gpios = <&gpiob 11 GPIO_ACTIVE_HIGH>; };
+        gpio_out_pc6: gpio_out2 { gpios = <&gpioc 6 GPIO_ACTIVE_HIGH>; };
+        gpio_in_pb15: gpio_in1 { gpios = <&gpiob 15 GPIO_ACTIVE_HIGH>; };
+    };
+
+    
+};
+
+
+
+&dma1 {
+    status = "okay";
+};
+
+&dma2 {
+    status = "okay";
+};
+
+&dmamux1 {
+    status = "okay";
+};
+
+&i2c1 {
+    status = "okay";
+    pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_FAST>;
+
+    power_monitor_1v2: ina219@40 {
+        compatible = "ti,ina219";
+        reg = <0x40>;
+        shunt-milliohm = <1500>; /* 1.5 Ohms = 1500 mOhm */
+        lsb-microamp = <10>;
+    };
+    power_monitor_3v3_ext: ina219@43 {
+        compatible = "ti,ina219"; 
+        reg = <0x43>;
+        shunt-milliohm = <1000>; /* 1.0 Ohms = 1000 mOhm */
+        lsb-microamp = <10>;
+    };
+    power_monitor_3v3_fpga: ina219@4c {
+        compatible = "ti,ina219"; 
+        reg = <0x4C>;
+        shunt-milliohm = <1000>;
+        lsb-microamp = <10>;
+    };
+    power_monitor_3v3_mcu: ina219@4f {
+        compatible = "ti,ina219"; 
+        reg = <0x4F>;
+        shunt-milliohm = <1000>;
+        lsb-microamp = <10>;
+    };
+    charger_0: bq25798@6b {
+        compatible = "i2c-device"; /* Custom driver binds to this */
+        reg = <0x6B>;
+    };
+};
+
+&usb {
+    status = "okay";
+    pinctrl-0 = <&usb_dm_pa11 &usb_dp_pa12>;
+    pinctrl-names = "default";
+
+    cdc_acm_uart0: cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
+
+&i2c2 {
+    status = "okay";
+    pinctrl-0 = <&i2c2_scl_pa9 &i2c2_sda_pa10>;
+    pinctrl-names = "default";
+};
+
+&spi1 {
+    status = "okay";
+    pinctrl-0 = <&spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7>;
+    pinctrl-names = "default";
+};
+
+
+
+/* REMOVE OR COMMENT THIS ENTIRE BLOCK OUT to test w/o dma */
+// &spi2 {
+//     dmas = <&dmamux1 0 20 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+//            <&dmamux1 1 19 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+//     dma-names = "tx", "rx";
+// };
+
+&spi2 {
+    status = "okay";
+    // Add internal pull-ups to the pinctrl (Check your pinctrl-0 node names)
+    // Most STM32 cards require Pull-ups on MISO to prevent floating
+    pinctrl-0 = <&spi2_sck_pa0 &spi2_miso_pa3 &spi2_mosi_pa4>;
+    pinctrl-names = "default";
+    cs-gpios = <&gpioa 1 GPIO_ACTIVE_LOW>; /* SD_CS */
+    
+    sdhc0: sdhc@0 {
+        compatible = "zephyr,sdhc-spi-slot";
+        reg = <0>;
+        /* LOWER THIS SPEED FOR TESTING */
+        /* Some cards fail to init if the first contact is at 8MHz */
+        spi-max-frequency = <400000>; 
+        mmc {
+            compatible = "zephyr,sdmmc-disk";
+            status = "okay";
         };
     };
+};
+
+/* DMA channel assignments for spi3 (FPGA) */
+&spi3 {
+    dmas = <&dmamux1 2 62 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+           <&dmamux1 3 61 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+    dma-names = "tx", "rx";
+};
+
+&spi3 {
+    status = "okay";
+    pinctrl-0 = <&spi3_sck_pb3 &spi3_miso_pb4 &spi3_mosi_pb5>;
+    pinctrl-names = "default";
+    cs-gpios = <&gpiod 3 GPIO_ACTIVE_LOW>; /* FPGA_CS */
+
+    fpga_spi: fpga@0 {
+        compatible = "vnd,spi-device";
+        reg = <0>;
+        spi-max-frequency = <8000000>;
+    };
+};
+
+&usart3 {
+    status = "okay";
+    pinctrl-0 = <&usart3_tx_pb2 &usart3_rx_pb0>;
+    pinctrl-names = "default";
+    current-speed = <115200>;
+};
+
+&adc1 {
+    status = "okay";
+    pinctrl-0 = <&adc1_in9_pb1 &adc1_in11_pb10>;
+    pinctrl-names = "default";
 };

@@ -129,6 +129,174 @@
     ],
     [
         [
+            "int adc_channel_setup",
+            "const struct device *dev,\n\t\t\t\tconst struct adc_channel_cfg *channel_cfg"
+        ],
+        "adc.h",
+        true
+    ],
+    [
+        [
+            "int adc_read",
+            "const struct device *dev,\n\t\t       const struct adc_sequence *sequence"
+        ],
+        "adc.h",
+        true
+    ],
+    [
+        [
+            "int adc_read_async",
+            "const struct device *dev,\n\t\t\t     const struct adc_sequence *sequence,\n\t\t\t     struct k_poll_signal *async"
+        ],
+        "adc.h",
+        true
+    ],
+    [
+        [
+            "int dma_start",
+            "const struct device *dev, uint32_t channel"
+        ],
+        "dma.h",
+        true
+    ],
+    [
+        [
+            "int dma_stop",
+            "const struct device *dev, uint32_t channel"
+        ],
+        "dma.h",
+        true
+    ],
+    [
+        [
+            "int dma_suspend",
+            "const struct device *dev, uint32_t channel"
+        ],
+        "dma.h",
+        true
+    ],
+    [
+        [
+            "int dma_resume",
+            "const struct device *dev, uint32_t channel"
+        ],
+        "dma.h",
+        true
+    ],
+    [
+        [
+            "int dma_request_channel",
+            "const struct device *dev,\n\t\t\t\t  void *filter_param"
+        ],
+        "dma.h",
+        true
+    ],
+    [
+        [
+            "void dma_release_channel",
+            "const struct device *dev,\n\t\t\t\t   uint32_t channel"
+        ],
+        "dma.h",
+        true
+    ],
+    [
+        [
+            "int dma_chan_filter",
+            "const struct device *dev,\n\t\t\t\t   int channel, void *filter_param"
+        ],
+        "dma.h",
+        true
+    ],
+    [
+        [
+            "int flash_read",
+            "const struct device *dev, off_t offset, void *data,\n\t\t\t size_t len"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "int flash_write",
+            "const struct device *dev, off_t offset,\n\t\t\t  const void *data,\n\t\t\t  size_t len"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "int flash_erase",
+            "const struct device *dev, off_t offset, size_t size"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "int flash_get_page_info_by_offs",
+            "const struct device *dev,\n\t\t\t\t\t  off_t offset,\n\t\t\t\t\t  struct flash_pages_info *info"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "int flash_get_page_info_by_idx",
+            "const struct device *dev,\n\t\t\t\t\t uint32_t page_index,\n\t\t\t\t\t struct flash_pages_info *info"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "size_t flash_get_page_count",
+            "const struct device *dev"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "int flash_sfdp_read",
+            "const struct device *dev, off_t offset,\n\t\t\t      void *data, size_t len"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "int flash_read_jedec_id",
+            "const struct device *dev, uint8_t *id"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "size_t flash_get_write_block_size",
+            "const struct device *dev"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "const struct flash_parameters *flash_get_parameters",
+            "const struct device *dev"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
+            "int flash_ex_op",
+            "const struct device *dev, uint16_t code,\n\t\t\t  const uintptr_t in, void *out"
+        ],
+        "flash.h",
+        true
+    ],
+    [
+        [
             "int gpio_pin_interrupt_configure",
             "const struct device *port,\n\t\t\t\t\t   gpio_pin_t pin,\n\t\t\t\t\t   gpio_flags_t flags"
         ],
@@ -205,6 +373,86 @@
             "const struct device *dev"
         ],
         "gpio.h",
+        true
+    ],
+    [
+        [
+            "ssize_t hwinfo_get_device_id",
+            "uint8_t *buffer, size_t length"
+        ],
+        "hwinfo.h",
+        true
+    ],
+    [
+        [
+            "int hwinfo_get_reset_cause",
+            "uint32_t *cause"
+        ],
+        "hwinfo.h",
+        true
+    ],
+    [
+        [
+            "int hwinfo_clear_reset_cause",
+            "void"
+        ],
+        "hwinfo.h",
+        true
+    ],
+    [
+        [
+            "int hwinfo_get_supported_reset_cause",
+            "uint32_t *supported"
+        ],
+        "hwinfo.h",
+        true
+    ],
+    [
+        [
+            "int i2c_configure",
+            "const struct device *dev, uint32_t dev_config"
+        ],
+        "i2c.h",
+        true
+    ],
+    [
+        [
+            "int i2c_get_config",
+            "const struct device *dev, uint32_t *dev_config"
+        ],
+        "i2c.h",
+        true
+    ],
+    [
+        [
+            "int i2c_transfer",
+            "const struct device *dev,\n\t\t\t   struct i2c_msg *msgs, uint8_t num_msgs,\n\t\t\t   uint16_t addr"
+        ],
+        "i2c.h",
+        true
+    ],
+    [
+        [
+            "int i2c_recover_bus",
+            "const struct device *dev"
+        ],
+        "i2c.h",
+        true
+    ],
+    [
+        [
+            "int i2c_target_driver_register",
+            "const struct device *dev"
+        ],
+        "i2c.h",
+        true
+    ],
+    [
+        [
+            "int i2c_target_driver_unregister",
+            "const struct device *dev"
+        ],
+        "i2c.h",
         true
     ],
     [
@@ -429,6 +677,22 @@
             "const struct device *dev, uint32_t cmd, uint32_t p"
         ],
         "uart.h",
+        true
+    ],
+    [
+        [
+            "int spi_transceive",
+            "const struct device *dev,\n\t\t\t     const struct spi_config *config,\n\t\t\t     const struct spi_buf_set *tx_bufs,\n\t\t\t     const struct spi_buf_set *rx_bufs"
+        ],
+        "spi.h",
+        true
+    ],
+    [
+        [
+            "int spi_release",
+            "const struct device *dev,\n\t\t\t  const struct spi_config *config"
+        ],
+        "spi.h",
         true
     ],
     [
@@ -1329,30 +1593,6 @@
     ],
     [
         [
-            "int adc_channel_setup",
-            "const struct device *dev,\n\t\t\t\tconst struct adc_channel_cfg *channel_cfg"
-        ],
-        "adc.h",
-        false
-    ],
-    [
-        [
-            "int adc_read",
-            "const struct device *dev,\n\t\t       const struct adc_sequence *sequence"
-        ],
-        "adc.h",
-        false
-    ],
-    [
-        [
-            "int adc_read_async",
-            "const struct device *dev,\n\t\t\t     const struct adc_sequence *sequence,\n\t\t\t     struct k_poll_signal *async"
-        ],
-        "adc.h",
-        false
-    ],
-    [
-        [
             "int auxdisplay_display_on",
             "const struct device *dev"
         ],
@@ -1985,62 +2225,6 @@
     ],
     [
         [
-            "int dma_start",
-            "const struct device *dev, uint32_t channel"
-        ],
-        "dma.h",
-        false
-    ],
-    [
-        [
-            "int dma_stop",
-            "const struct device *dev, uint32_t channel"
-        ],
-        "dma.h",
-        false
-    ],
-    [
-        [
-            "int dma_suspend",
-            "const struct device *dev, uint32_t channel"
-        ],
-        "dma.h",
-        false
-    ],
-    [
-        [
-            "int dma_resume",
-            "const struct device *dev, uint32_t channel"
-        ],
-        "dma.h",
-        false
-    ],
-    [
-        [
-            "int dma_request_channel",
-            "const struct device *dev,\n\t\t\t\t  void *filter_param"
-        ],
-        "dma.h",
-        false
-    ],
-    [
-        [
-            "void dma_release_channel",
-            "const struct device *dev,\n\t\t\t\t   uint32_t channel"
-        ],
-        "dma.h",
-        false
-    ],
-    [
-        [
-            "int dma_chan_filter",
-            "const struct device *dev,\n\t\t\t\t   int channel, void *filter_param"
-        ],
-        "dma.h",
-        false
-    ],
-    [
-        [
             "int eeprom_read",
             "const struct device *dev, off_t offset, void *data,\n\t\t\t  size_t len"
         ],
@@ -2257,94 +2441,6 @@
     ],
     [
         [
-            "int flash_read",
-            "const struct device *dev, off_t offset, void *data,\n\t\t\t size_t len"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "int flash_write",
-            "const struct device *dev, off_t offset,\n\t\t\t  const void *data,\n\t\t\t  size_t len"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "int flash_erase",
-            "const struct device *dev, off_t offset, size_t size"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "int flash_get_page_info_by_offs",
-            "const struct device *dev,\n\t\t\t\t\t  off_t offset,\n\t\t\t\t\t  struct flash_pages_info *info"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "int flash_get_page_info_by_idx",
-            "const struct device *dev,\n\t\t\t\t\t uint32_t page_index,\n\t\t\t\t\t struct flash_pages_info *info"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "size_t flash_get_page_count",
-            "const struct device *dev"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "int flash_sfdp_read",
-            "const struct device *dev, off_t offset,\n\t\t\t      void *data, size_t len"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "int flash_read_jedec_id",
-            "const struct device *dev, uint8_t *id"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "size_t flash_get_write_block_size",
-            "const struct device *dev"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "const struct flash_parameters *flash_get_parameters",
-            "const struct device *dev"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
-            "int flash_ex_op",
-            "const struct device *dev, uint16_t code,\n\t\t\t  const uintptr_t in, void *out"
-        ],
-        "flash.h",
-        false
-    ],
-    [
-        [
             "int fuel_gauge_get_prop",
             "const struct device *dev, fuel_gauge_prop_t prop,\n\t\t\t\t  union fuel_gauge_prop_val *val"
         ],
@@ -2465,38 +2561,6 @@
     ],
     [
         [
-            "ssize_t hwinfo_get_device_id",
-            "uint8_t *buffer, size_t length"
-        ],
-        "hwinfo.h",
-        false
-    ],
-    [
-        [
-            "int hwinfo_get_reset_cause",
-            "uint32_t *cause"
-        ],
-        "hwinfo.h",
-        false
-    ],
-    [
-        [
-            "int hwinfo_clear_reset_cause",
-            "void"
-        ],
-        "hwinfo.h",
-        false
-    ],
-    [
-        [
-            "int hwinfo_get_supported_reset_cause",
-            "uint32_t *supported"
-        ],
-        "hwinfo.h",
-        false
-    ],
-    [
-        [
             "int hwspinlock_trylock",
             "const struct device *dev, uint32_t id"
         ],
@@ -2525,54 +2589,6 @@
             "const struct device *dev"
         ],
         "hwspinlock.h",
-        false
-    ],
-    [
-        [
-            "int i2c_configure",
-            "const struct device *dev, uint32_t dev_config"
-        ],
-        "i2c.h",
-        false
-    ],
-    [
-        [
-            "int i2c_get_config",
-            "const struct device *dev, uint32_t *dev_config"
-        ],
-        "i2c.h",
-        false
-    ],
-    [
-        [
-            "int i2c_transfer",
-            "const struct device *dev,\n\t\t\t   struct i2c_msg *msgs, uint8_t num_msgs,\n\t\t\t   uint16_t addr"
-        ],
-        "i2c.h",
-        false
-    ],
-    [
-        [
-            "int i2c_recover_bus",
-            "const struct device *dev"
-        ],
-        "i2c.h",
-        false
-    ],
-    [
-        [
-            "int i2c_target_driver_register",
-            "const struct device *dev"
-        ],
-        "i2c.h",
-        false
-    ],
-    [
-        [
-            "int i2c_target_driver_unregister",
-            "const struct device *dev"
-        ],
-        "i2c.h",
         false
     ],
     [
@@ -3309,22 +3325,6 @@
             "const struct device *dev,\n\t\t\t\tuint16_t addr, uint8_t cmd,\n\t\t\t\tuint8_t snd_count, uint8_t *snd_buf,\n\t\t\t\tuint8_t *rcv_count, uint8_t *rcv_buf"
         ],
         "smbus.h",
-        false
-    ],
-    [
-        [
-            "int spi_transceive",
-            "const struct device *dev,\n\t\t\t     const struct spi_config *config,\n\t\t\t     const struct spi_buf_set *tx_bufs,\n\t\t\t     const struct spi_buf_set *rx_bufs"
-        ],
-        "spi.h",
-        false
-    ],
-    [
-        [
-            "int spi_release",
-            "const struct device *dev,\n\t\t\t  const struct spi_config *config"
-        ],
-        "spi.h",
         false
     ],
     [

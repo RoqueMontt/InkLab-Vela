@@ -1,6 +1,6 @@
 === FULL UI CODEBASE SUMMARY ===
 
-- App.vue
+--- FILE: Legacy\inklab-dashboard\src\App.vue ---
 
 <script setup>
 import { ref, watch, onMounted } from 'vue'
@@ -296,7 +296,7 @@ onMounted(() => {
 
 ==================================================
 
-- main.js
+--- FILE: Legacy\inklab-dashboard\src\main.js ---
 
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
@@ -309,7 +309,7 @@ app.mount('#app')
 
 ==================================================
 
-- components\CustomSelect.vue
+--- FILE: Legacy\inklab-dashboard\src\components\CustomSelect.vue ---
 
 <script setup>
 import { ref, onMounted, onUnmounted, computed } from 'vue'
@@ -420,7 +420,7 @@ const selectOption = (val) => {
 
 ==================================================
 
-- components\DiagnosticModal.vue
+--- FILE: Legacy\inklab-dashboard\src\components\DiagnosticModal.vue ---
 
 <script setup>
 import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
@@ -815,7 +815,7 @@ onUnmounted(() => {
 
 ==================================================
 
-- components\Header.vue
+--- FILE: Legacy\inklab-dashboard\src\components\Header.vue ---
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
@@ -1143,7 +1143,7 @@ header {
 
 ==================================================
 
-- components\SidebarLog.vue
+--- FILE: Legacy\inklab-dashboard\src\components\SidebarLog.vue ---
 
 <script setup>
 import { ref, watch, nextTick, computed, onMounted } from 'vue'
@@ -1343,7 +1343,7 @@ watch(() => store.logs.length, async () => {
 
 ==================================================
 
-- components\views\AlgorithmDashboard.vue
+--- FILE: Legacy\inklab-dashboard\src\components\views\AlgorithmDashboard.vue ---
 
 <template>
   <div class="algo-page">
@@ -1384,7 +1384,7 @@ watch(() => store.logs.length, async () => {
 
 ==================================================
 
-- components\views\AutomationBench.vue
+--- FILE: Legacy\inklab-dashboard\src\components\views\AutomationBench.vue ---
 
 <script setup>
 import { ref } from 'vue'
@@ -1708,7 +1708,7 @@ const runCapacitanceSweep = async () => {
 
 ==================================================
 
-- components\views\FpgaConfig.vue
+--- FILE: Legacy\inklab-dashboard\src\components\views\FpgaConfig.vue ---
 
 <script setup>
 import { ref, computed, onMounted, onActivated, watch } from 'vue'
@@ -2289,7 +2289,7 @@ button { border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s
 
 ==================================================
 
-- components\views\SwTerminal.vue
+--- FILE: Legacy\inklab-dashboard\src\components\views\SwTerminal.vue ---
 
 <script setup>
 import { ref, watch, nextTick, onMounted, onActivated, onUnmounted, computed } from 'vue'
@@ -2758,7 +2758,7 @@ input[type="text"]:disabled { opacity: 0.5; cursor: not-allowed; }
 
 ==================================================
 
-- composables\useSerial.js
+--- FILE: Legacy\inklab-dashboard\src\composables\useSerial.js ---
 
 import { ref } from 'vue'
 import { useSystemStore } from '../stores/systemStore'
@@ -3021,7 +3021,7 @@ async function sendCommand(cmd, ending = '\n') {
 
 ==================================================
 
-- stores\systemStore.js
+--- FILE: Legacy\inklab-dashboard\src\stores\systemStore.js ---
 
 import { defineStore } from 'pinia'
 

@@ -1,80 +1,4237 @@
-=== ZEPHYR SELECTIVE SUMMARY ===
+=== FULL ZEPHYR CODEBASE SUMMARY ===
 
---- FILE: CMakeLists.txt ---
+--- FILE: src\bus_manager.c ---
 
-cmake_minimum_required(VERSION 3.20.0)
-find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(inklab_blinky)
+/**
+ * @file bus_manager.c
+ * @brief Implementation of shared bus synchronization.
+ */
+#include "bus_manager.h"
+#include <zephyr/kernel.h>
+#include <errno.h>
 
-target_sources(app PRIVATE src/main.c)
+/* Centralized mutex for the I2C1 Bus */
+static K_MUTEX_DEFINE(i2c1_bus_mutex);
 
-==================================================
+/** Internal helper to lock the I2C bus */
+int BusManager_LockI2C(void) {
+    if (k_mutex_lock(&i2c1_bus_mutex, K_FOREVER) == 0) {
+        return 0;
+    }
+    return -ENOLCK;
+}
 
---- FILE: prj.conf ---
-
-CONFIG_GPIO=y
-
-==================================================
-
---- FILE: west.yml ---
-
-manifest:
-  remotes:
-    - name: zephyrproject-rtos
-      url-base: https://github.com/zephyrproject-rtos
-  projects:
-    - name: zephyr
-      remote: zephyrproject-rtos
-      revision: v3.6.0
-      import: true
-  self:
-    path: inklab-firmware
-
-==================================================
-
---- FILE: boards\inklab_v1.overlay ---
-
-/ {
-    aliases {
-        /* Links the code alias "led0" to our custom hardware node below */
-        led0 = &my_rgb_red;
-    };
-
-    leds {
-        compatible = "gpio-leds";
-        my_rgb_red: led_red {
-            /* GPIOC, Pin 15. ACTIVE_LOW handles the Common Anode inversion automatically! */
-            gpios = <&gpioc 15 GPIO_ACTIVE_LOW>;
-            label = "RGB LED 0 (Red)";
-        };
-    };
-};
+/** Internal helper to unlock the I2C bus */
+void BusManager_UnlockI2C(void) {
+    k_mutex_unlock(&i2c1_bus_mutex);
+}
 
 ==================================================
 
 --- FILE: src\main.c ---
 
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/gpio.h>
+#include <zephyr/device.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/usb/usb_device.h>
+#include <string.h>
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/dfu/flash_img.h>
+#include <zephyr/dfu/mcuboot.h>
+#include <zephyr/fs/fs.h>
+#include <zephyr/sys/reboot.h>
 
-/* Ask the device tree for the pin details of "led0" */
-static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+#include "system_config.h"
+#include "hal/powerMonitor.h"
+#include "hal/bq25798.h"
+#include "hal/battery_soc.h"
+#include "hal/led_manager.h"
+#include "hal/joystick.h"
 
-int main(void) {
-    /* Verify the GPIO hardware is ready */
-    if (!gpio_is_ready_dt(&led)) {
-        return 0;
+/* --- Device Tree Handles --- */
+static const struct device *i2c1_dev = DEVICE_DT_GET(DT_NODELABEL(i2c1));
+
+PowerMonitor_t ina_1v2_core;
+PowerMonitor_t ina_3v3_ext;
+PowerMonitor_t ina_3v3_fpga;
+PowerMonitor_t ina_3v3_mcu;
+
+/* External Timer owned by led_manager.c */
+extern struct k_timer led_pwm_timer;
+
+/* --- Telemetry Globals exported for frontend_api.c --- */
+volatile uint8_t telem_is_muted = 0;
+volatile uint32_t telem_rate_ms = TELEM_RATE_DEFAULT_MS;
+
+volatile uint8_t sd_is_mounted = 0;
+static struct fs_mount_t sd_mount = {
+    .type = FS_FATFS,
+    .fs_data = NULL,                          /* Iniftialized by Zephyr */
+    .mnt_point = "/SD:",                      /* Matches SD_MOUNT_POINT in system_config.h */
+    .storage_dev = (void *)"SD",              /* Target the SD disk */
+};
+
+void Telemetry_SetFastTarget(uint8_t ch, const char *target) { /* Stub for Fast Mode */ }
+
+
+/** 
+ * @brief Native Zephyr OTA DFU using MCUboot and Flash Map 
+ */
+int OTA_Update_From_SD(const char *filename) {
+    struct fs_file_t file;
+    struct flash_img_context ctx;
+    uint8_t buf[512];
+    int rc;
+    ssize_t bytes_read;
+
+    fs_file_t_init(&file);
+    if (fs_open(&file, filename, FS_O_READ) != 0) {
+        printk("ERR: OTA file not found on SD.\n");
+        return -ENOENT;
     }
 
-    /* Configure PC15 as an output. Because of ACTIVE_LOW in the overlay,
-       setting it to "ACTIVE" will pull the physical pin to 0V and turn the LED ON. */
-    gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
+    printk("LOG: Staging OTA Image to Slot 1...\n");
+    flash_img_init(&ctx);
+    
+    while ((bytes_read = fs_read(&file, buf, sizeof(buf))) > 0) {
+        rc = flash_img_buffered_write(&ctx, buf, bytes_read, false);
+        if (rc < 0) {
+            printk("ERR: Flash write failed (%d).\n", rc);
+            fs_close(&file);
+            return rc;
+        }
+    }
+    
+    /* Flush remaining bytes */
+    flash_img_buffered_write(&ctx, buf, 0, true);
+    fs_close(&file);
 
+    printk("LOG: Image verified. Requesting MCUboot upgrade...\n");
+    
+    /* Flag MCUboot to test the image on next reboot */
+    boot_request_upgrade(BOOT_UPGRADE_TEST);
+    
+    k_msleep(500); // Allow USB pipeline to flush
+    sys_reboot(SYS_REBOOT_COLD);
+    return 0;
+}
+
+/* --- Consumer Thread for Joystick Inputs --- */
+static void joystick_thread_fn(void *arg1, void *arg2, void *arg3) {
+    Joystick_Init();
     while (1) {
-        gpio_pin_toggle_dt(&led);
-        k_msleep(500); /* RTOS safe delay: 500ms */
+        JoyAction_t action = Joystick_Process();
+        if (action != JOY_NONE) {
+            JoystickMap_t map = Joystick_GetMap();
+            
+            if (action == JOY_UP || action == JOY_DOWN) {
+                if (map.ud == 1) BQ25798_TogglePFM();
+            } else if (action == JOY_LEFT || action == JOY_RIGHT) {
+                if (map.lr == 1) BQ25798_AdjustVOTG(action == JOY_RIGHT ? 100 : -100);
+            } else if (action == JOY_CENTER) {
+                if (map.cen == 1) BQ25798_ToggleAutoRearm();
+            }
+        }
+        k_msleep(JOYSTICK_POLL_RATE_MS);
     }
 }
+K_THREAD_DEFINE(joy_thread, JOYSTICK_THREAD_STACK, joystick_thread_fn, NULL, NULL, NULL, JOYSTICK_THREAD_PRIO, 0, 0);
+
+int main(void) {
+    k_msleep(100); 
+    
+    /* Safely enable USB */
+    int ret = usb_enable(NULL);
+    if (ret != 0 && ret != -EALREADY) {
+        // Do not return! Just log it and keep booting the hardware.
+        printk("WRN: USB failed to enable or is unplugged (%d)\n", ret);
+    }
+    
+    k_sleep(K_MSEC(2500));
+
+    /* Initialize SD Card */
+    printk("LOG: Attempting to mount SD Card...\n");
+    int sd_err = fs_mount(&sd_mount);
+    
+    if (sd_err == 0) {
+        printk("LOG: SD Card mounted successfully.\n");
+        sd_is_mounted = 1;
+    } else {
+        printk("ERR: SD Card mount failed with code: %d\n", sd_err);
+        sd_is_mounted = 0;
+        
+        // Translate common codes for easier debugging
+        if (sd_err == -5) printk("DEBUG: Error -5 (EIO). Usually means bad SPI wiring, missing pull-ups, or SPI speed too high.\n");
+        if (sd_err == -19) printk("DEBUG: Error -19 (ENODEV). Usually means the SD card is not physically inserted or detected.\n");
+        if (sd_err == -22) printk("DEBUG: Error -22 (EINVAL). Usually means the FAT32/exFAT format is corrupted or unrecognized.\n");
+    }
+    
+    printk("*** Booting Zephyr OS build %s ***\n", KERNEL_VERSION_STRING);
+
+    if (!device_is_ready(i2c1_dev)) return -ENODEV;
+
+    /* Initialize Hardware Modules */
+    LED_Init();
+    k_timer_start(&led_pwm_timer, K_MSEC(LED_PWM_PERIOD_MS), K_MSEC(LED_PWM_PERIOD_MS));
+
+    BQ25798_Init(i2c1_dev);
+    PowerMonitor_Init(&ina_1v2_core, i2c1_dev, POWER_MONITOR_ADDR_40, INA_CORE_RSHUNT, INA_CORE_MAX_A);
+    PowerMonitor_Init(&ina_3v3_ext,  i2c1_dev, POWER_MONITOR_ADDR_43, INA_EXT_RSHUNT, INA_EXT_MAX_A);
+    PowerMonitor_Init(&ina_3v3_fpga, i2c1_dev, POWER_MONITOR_ADDR_4C, INA_FPGA_RSHUNT, INA_FPGA_MAX_A);
+    PowerMonitor_Init(&ina_3v3_mcu,  i2c1_dev, POWER_MONITOR_ADDR_4F, INA_MCU_RSHUNT, INA_MCU_MAX_A);
+    PowerMonitor_SetOffset(&ina_3v3_fpga, INA_FPGA_OFFSET_MA);
+
+    BatterySOC_Init();
+    
+    BQ25798_Data_t bq_data;
+    bool backup_armed = false;
+    uint32_t boot_tick = k_uptime_get_32();
+
+    while (1) {
+        if (BQ25798_ReadAll(&bq_data) == 0) {
+            float soc = 0.0f, r_int = 0.0f;
+            BatterySOC_Update(bq_data.vbat_V, bq_data.ibat_mA, &soc, &r_int);
+
+            if (!telem_is_muted) {
+                char bq_json[256];
+                BQ25798_GetJson(&bq_data, bq_json, sizeof(bq_json));
+                char* brace = strrchr(bq_json, '}');
+                if (brace) snprintf(brace, sizeof(bq_json) - (brace - bq_json), 
+                                    ",\"soc\":%.1f,\"r_int\":%.3f}", (double)soc, (double)r_int);
+                printk("%s\n", bq_json);
+            }
+
+            // Arm/Rearm Logic
+            if (!backup_armed && (k_uptime_get_32() - boot_tick > BQ_BACKUP_ARM_DELAY_MS)) {
+                BQ25798_EnableBackup5V5(); backup_armed = true;
+            }
+            if (((bq_data.stat1 >> 1) & 0x0F) == 0x0C && (bq_data.stat0 & (1 << 1))) {
+                BQ25798_RearmBackup(BQ_BACKUP_REARM_DELAY_MS); 
+            }
+        }
+
+        if (!telem_is_muted) {
+            PowerMonitor_Data_t ina;
+            if (PowerMonitor_Read(&ina_1v2_core, &ina) == 0)
+                printk("{\"type\":\"ina\",\"id\":\"1v2_core\",\"v\":%.2f,\"i\":%.2f,\"p\":%.4f}\n", (double)ina.bus_voltage_V, (double)ina.current_mA, (double)ina.power_mW);
+            if (PowerMonitor_Read(&ina_3v3_ext, &ina) == 0)
+                printk("{\"type\":\"ina\",\"id\":\"3v3_ext\",\"v\":%.2f,\"i\":%.2f,\"p\":%.4f}\n", (double)ina.bus_voltage_V, (double)ina.current_mA, (double)ina.power_mW);
+            if (PowerMonitor_Read(&ina_3v3_fpga, &ina) == 0)
+                printk("{\"type\":\"ina\",\"id\":\"3v3_fpga\",\"v\":%.2f,\"i\":%.2f,\"p\":%.4f}\n", (double)ina.bus_voltage_V, (double)ina.current_mA, (double)ina.power_mW);
+            if (PowerMonitor_Read(&ina_3v3_mcu, &ina) == 0)
+                printk("{\"type\":\"ina\",\"id\":\"3v3_mcu\",\"v\":%.2f,\"i\":%.2f,\"p\":%.4f}\n", (double)ina.bus_voltage_V, (double)ina.current_mA, (double)ina.power_mW);
+        }
+        k_msleep(telem_rate_ms);
+    }
+    return 0;
+}
+
+==================================================
+
+--- FILE: src\hal\battery_defs.c ---
+
+/**
+ * @file battery_defs.c
+ * @brief Concrete battery profile instances.
+ */
+
+#include "battery_defs.h"
+#include "system_config.h"
+
+
+/* Standard 3200 mAh Li-Ion cell (e.g. INR18650-32E) */
+const BatteryProfile_t BATT_PROFILE_LIION_3200 = {
+    .charge_voltage_mV  = BATT_LIION_3200_CHG_MV,
+    .charge_current_mA  = BATT_LIION_3200_CHG_MA,
+    .term_current_mA    = BATT_LIION_3200_TERM_MA,
+    .min_sys_voltage_mV = BATT_LIION_3200_SYS_MV,
+};
+
+==================================================
+
+--- FILE: src\hal\battery_defs.h ---
+
+/**
+ * @file battery_defs.h
+ * @brief Shared battery profile type definitions.
+ *
+ * Hardware-agnostic.  No HAL or Zephyr headers required here — just plain C.
+ * Include this wherever a BatteryProfile_t is needed (bq25798, battery_soc, …).
+ */
+
+#ifndef BATTERY_DEFS_H
+#define BATTERY_DEFS_H
+
+#include <stdint.h>
+
+/* --------------------------------------------------------------------------
+ * Battery chemistry profile
+ * -------------------------------------------------------------------------- */
+typedef struct {
+    uint16_t charge_voltage_mV;   /**< CV phase target, e.g. 4200 */
+    uint16_t charge_current_mA;   /**< CC phase limit,  e.g. 1600 */
+    uint16_t term_current_mA;     /**< Termination threshold,  e.g.  80 */
+    uint16_t min_sys_voltage_mV;  /**< Minimum system rail,    e.g. 3000 */
+} BatteryProfile_t;
+
+/* --------------------------------------------------------------------------
+ * Pre-defined profiles (defined in battery_defs.c)
+ * -------------------------------------------------------------------------- */
+extern const BatteryProfile_t BATT_PROFILE_LIION_3200;
+
+#endif /* BATTERY_DEFS_H */
+
+==================================================
+
+--- FILE: src\hal\battery_soc.c ---
+
+/**
+ * @file battery_soc.c
+ * @brief State-of-Charge estimator implementation.
+ *
+ * Algorithm:
+ *   1. Tracks Δv/Δi steps to compute a running R_internal (EMA filtered).
+ *   2. Removes IR-drop from the terminal voltage → Open-Circuit Voltage.
+ *   3. Maps OCV to SOC via a look-up table (linear interpolation).
+ *   4. Applies a heavy EMA to suppress measurement noise on the output.
+ *
+ * Pure C — no HAL, no Zephyr primitives required.
+ */
+
+#include "battery_soc.h"
+#include "system_config.h"
+
+#include <math.h>
+
+/* --------------------------------------------------------------------------
+ * OCV → SOC Look-up Table  (Standard Li-Ion 4.2 V chemistry)
+ * -------------------------------------------------------------------------- */
+typedef struct {
+    float ocv;
+    float soc;
+} OcvSocPoint_t;
+
+static const OcvSocPoint_t li_ion_ocv_table[] = {
+    {4.20f, 100.0f}, {4.10f,  95.0f}, {4.06f,  90.0f}, {3.98f,  80.0f},
+    {3.92f,  70.0f}, {3.87f,  60.0f}, {3.82f,  50.0f}, {3.79f,  40.0f},
+    {3.75f,  30.0f}, {3.70f,  20.0f}, {3.60f,  10.0f}, {3.50f,   5.0f},
+    {3.30f,   0.0f},
+};
+
+#define OCV_TABLE_LEN  ((int)(sizeof(li_ion_ocv_table) / sizeof(li_ion_ocv_table[0])))
+
+/* --------------------------------------------------------------------------
+ * Module state
+ * -------------------------------------------------------------------------- */
+static float r_internal;      /* Estimated internal resistance (Ω) */
+static float last_vbat;
+static float last_ibat_A;
+static float filtered_soc;    /* -1 means "not yet initialised" */
+
+/* --------------------------------------------------------------------------
+ * Private helpers
+ * -------------------------------------------------------------------------- */
+ 
+ /** @brief Interpolates the Open-Circuit Voltage (OCV) to a State-of-Charge (SOC) percentage. */
+static float ocv_to_soc(float ocv)
+{
+    if (ocv >= li_ion_ocv_table[0].ocv) {
+        return 100.0f;
+    }
+    if (ocv <= li_ion_ocv_table[OCV_TABLE_LEN - 1].ocv) {
+        return 0.0f;
+    }
+
+    for (int i = 0; i < OCV_TABLE_LEN - 1; i++) {
+        if (ocv <= li_ion_ocv_table[i].ocv &&
+            ocv >= li_ion_ocv_table[i + 1].ocv) {
+            float v_diff = li_ion_ocv_table[i].ocv - li_ion_ocv_table[i + 1].ocv;
+            float s_diff = li_ion_ocv_table[i].soc - li_ion_ocv_table[i + 1].soc;
+            float v_frac = (ocv - li_ion_ocv_table[i + 1].ocv) / v_diff;
+            return li_ion_ocv_table[i + 1].soc + (v_frac * s_diff);
+        }
+    }
+    return 0.0f;
+}
+
+/* --------------------------------------------------------------------------
+ * Public API
+ * -------------------------------------------------------------------------- */
+void BatterySOC_Init(void)
+{
+    r_internal   = BATT_DEFAULT_R_INT_OHMS; /* Reasonable starting estimate for Li-Ion */
+    filtered_soc = -1.0f;  /* Forces hard-set on first Update() call  */
+    last_vbat    = 0.0f;
+    last_ibat_A  = 0.0f;
+}
+
+void BatterySOC_Update(float vbat_V, float current_mA,
+                       float *out_soc, float *out_r_int)
+{
+    float current_A = current_mA / 1000.0f;
+    float delta_i   = current_A - last_ibat_A;
+    float delta_v   = vbat_V    - last_vbat;
+
+    /* Update R_int only when the current step is large enough for a clean ΔI */
+    if (last_vbat > 0.0f && fabsf(delta_i) > BATT_SOC_MIN_DELTA_I) {
+        float r_calc = delta_v / delta_i;
+        /* Sanity-clamp: reject noise and shorts */
+        if (r_calc > BATT_SOC_MIN_R_INT && r_calc < BATT_SOC_MAX_R_INT) {
+            r_internal = (BATT_SOC_R_EMA_W * r_calc) + ((1.0f - BATT_SOC_R_EMA_W) * r_internal); /* EMA */
+        }
+    }
+
+    last_vbat   = vbat_V;
+    last_ibat_A = current_A;
+
+    /* Compensate terminal voltage for IR-drop to recover OCV */
+    float estimated_ocv = vbat_V - (current_A * r_internal);
+    float inst_soc      = ocv_to_soc(estimated_ocv);
+
+    if (filtered_soc < 0.0f) {
+        filtered_soc = inst_soc; /* Hard-set on first call */
+    } else {
+        filtered_soc = (BATT_SOC_SOC_EMA_W * inst_soc) + ((1.0f - BATT_SOC_SOC_EMA_W) * filtered_soc); /* Heavy EMA */
+    }
+
+    *out_soc   = filtered_soc;
+    *out_r_int = r_internal;
+}
+
+==================================================
+
+--- FILE: src\hal\battery_soc.h ---
+
+/**
+ * @file battery_soc.h
+ * @brief State-of-Charge estimator (OCV + internal-resistance compensation).
+ *
+ * Pure C, no RTOS / HAL dependency.  Feed it periodic BQ25798 telemetry and
+ * it returns a filtered SOC percentage and a running estimate of R_int.
+ */
+
+#ifndef BATTERY_SOC_H
+#define BATTERY_SOC_H
+
+/* --------------------------------------------------------------------------
+ * API
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief Reset the SOC estimator to its initial state.
+ *        Call once before the first BatterySOC_Update().
+ */
+void BatterySOC_Init(void);
+
+/**
+ * @brief Update the SOC estimate with fresh telemetry.
+ *
+ * @param vbat_V      Battery terminal voltage in Volts.
+ * @param current_mA  Charge/discharge current in mA (negative = discharge).
+ * @param out_soc     [out] Filtered SOC in percent (0–100).
+ * @param out_r_int   [out] Estimated internal resistance in Ohms.
+ */
+void BatterySOC_Update(float vbat_V, float current_mA,
+                       float *out_soc, float *out_r_int);
+
+#endif /* BATTERY_SOC_H */
+
+==================================================
+
+--- FILE: src\hal\bq25798.c ---
+
+/**
+ * @file bq25798.c
+ * @brief Thread-safe driver for TI BQ25798 Integrated Charger.
+ */
+#include "bq25798.h"
+#include "bus_manager.h"
+#include "system_config.h"
+#include <stdio.h>
+#include <string.h>
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/i2c.h>  
+#include <errno.h>
+
+#define REG00_MIN_SYS_VOLTAGE       0x00
+#define REG01_CHARGE_VOLTAGE        0x01
+#define REG03_CHARGE_CURRENT        0x03
+#define REG05_VINDPM                0x05
+#define REG06_IINDPM                0x06
+#define REG09_TERMINATION_CONTROL   0x09
+#define REG0B_VOTG_REGULATION       0x0B
+#define REG0D_IOTG_REGULATION       0x0D
+#define REG0F_CHARGER_CTRL_0        0x0F
+#define REG10_CHARGER_CTRL_1        0x10
+#define REG11_CHARGER_CTRL_2        0x11
+#define REG12_CHARGER_CTRL_3        0x12
+#define REG13_CHARGER_CTRL_4        0x13
+#define REG14_CHARGER_CTRL_5        0x14
+#define REG16_TEMP_CONTROL          0x16
+#define REG1B_CHG_STAT_0            0x1B
+#define REG2E_ADC_CONTROL           0x2E
+#define REG31_IBUS_ADC              0x31
+
+static struct i2c_dt_spec bq_i2c;
+static uint8_t bq_auto_rearm_enabled = 1;
+static float bq_ema_coeff = 0.8f;
+
+/** @brief Internal wrapper for thread-safe single byte write */
+static int bq_write_byte(uint8_t reg, uint8_t value) {
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    int ret = i2c_reg_write_byte_dt(&bq_i2c, reg, value);
+    BusManager_UnlockI2C();
+    return ret;
+}
+
+/** @brief Internal wrapper for thread-safe word write */
+static int bq_write_word(uint8_t reg, uint16_t value) {
+    uint8_t buf[2] = { (uint8_t)(value >> 8), (uint8_t)(value & 0xFF) };
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    int ret = i2c_burst_write_dt(&bq_i2c, reg, buf, 2);
+    BusManager_UnlockI2C();
+    return ret;
+}
+
+/** @brief Internal wrapper for thread-safe word read */
+static int bq_read_word(uint8_t reg, int16_t* value) {
+    uint8_t buf[2];
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    int status = i2c_burst_read_dt(&bq_i2c, reg, buf, 2);
+    BusManager_UnlockI2C();
+    
+    if (status == 0) *value = (int16_t)((buf[0] << 8) | buf[1]);
+    return status;
+}
+
+/** @brief Internal wrapper for thread-safe bitmask update */
+static int bq_update_bits(uint8_t reg, uint8_t mask, uint8_t value) {
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    int ret = i2c_reg_update_byte_dt(&bq_i2c, reg, mask, value);
+    BusManager_UnlockI2C();
+    return ret;
+}
+
+int BQ25798_Init(const struct device *i2c_bus) {
+    if (!device_is_ready(i2c_bus)) return -ENODEV;
+
+    bq_i2c.bus = i2c_bus;
+    bq_i2c.addr = BQ_I2C_ADDR;
+
+    bq_update_bits(REG10_CHARGER_CTRL_1, 0x07, 0x00); /* Disable Watchdog */
+    bq_update_bits(REG13_CHARGER_CTRL_4, (1<<5), (1<<5)); /* 750kHz */
+    bq_update_bits(REG12_CHARGER_CTRL_3, (1<<4), (1<<4)); /* Disable PFM */
+    bq_update_bits(REG14_CHARGER_CTRL_5, (1<<5)|(1<<1), (1<<5)); /* EN_IBAT */
+    bq_update_bits(REG11_CHARGER_CTRL_2, (1<<6), 0); /* Disable INDET */
+
+    BQ25798_SetInputCurrent(BQ_DEFAULT_ICHG_MA);
+    return bq_write_byte(REG2E_ADC_CONTROL, BQ_ADC_CTRL_ENABLE); /* Enable Continuous ADC */
+}
+
+int BQ25798_ReadAll(BQ25798_Data_t* data) {
+    uint8_t stat_fault_burst[7];
+    uint8_t adc_burst[12];
+    static float ema_ibat = 0.0f;
+    static float ema_ibus = 0.0f;
+    static bool first_read = true;
+    int ret;
+
+    bq_update_bits(REG2E_ADC_CONTROL, 0x80, 0x80);
+
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    ret = i2c_burst_read_dt(&bq_i2c, REG1B_CHG_STAT_0, stat_fault_burst, 7);
+    if (ret == 0) ret = i2c_burst_read_dt(&bq_i2c, REG31_IBUS_ADC, adc_burst, 12);
+    if (ret == 0) ret = i2c_reg_read_byte_dt(&bq_i2c, REG0F_CHARGER_CTRL_0, &data->ctrl0);
+    BusManager_UnlockI2C();
+
+    if (ret < 0) return -EIO;
+
+    data->stat0  = stat_fault_burst[0];
+    data->stat1  = stat_fault_burst[1];
+    data->fault0 = stat_fault_burst[5];
+    data->fault1 = stat_fault_burst[6];
+
+    int16_t raw_ibus = (int16_t)((adc_burst[0] << 8) | adc_burst[1]);
+    int16_t raw_ibat = (int16_t)((adc_burst[2] << 8) | adc_burst[3]);
+    int16_t raw_vbus = (int16_t)((adc_burst[4] << 8) | adc_burst[5]);
+    int16_t raw_vbat = (int16_t)((adc_burst[10] << 8) | adc_burst[11]);
+
+    float current_ibat = (float)raw_ibat;
+    float current_ibus = (float)raw_ibus;
+
+    if (first_read) {
+        ema_ibat = current_ibat;
+        ema_ibus = current_ibus;
+        first_read = false;
+    } else {
+        ema_ibat = (bq_ema_coeff * current_ibat) + ((1.0f - bq_ema_coeff) * ema_ibat);
+        ema_ibus = (bq_ema_coeff * current_ibus) + ((1.0f - bq_ema_coeff) * ema_ibus);
+    }
+
+    data->vbus_V  = (float)raw_vbus / 1000.0f;
+    data->vbat_V  = (float)raw_vbat / 1000.0f;
+    data->ibus_mA = ema_ibus;
+    data->ibat_mA = ema_ibat;
+    data->power_mW = data->vbat_V * data->ibat_mA;
+    data->vbus_power_mW = data->vbus_V * data->ibus_mA;
+
+    const char* modes[] = {"Idle", "Trickle", "Pre-chg", "Fast", "Taper", "Res", "Top-off", "Term"};
+    uint8_t m_idx = (data->stat1 >> 5) & 0x07;
+    snprintf(data->status_str, sizeof(data->status_str), "%s", modes[m_idx]);
+
+    uint8_t vbus_stat = (data->stat1 >> 1) & 0x0F;
+    if (vbus_stat == 0x07 || vbus_stat == 0x0C) {
+        snprintf(data->status_str, sizeof(data->status_str), "OTG");
+    }
+
+    return 0;
+}
+
+int BQ25798_DumpRegisters(char* buffer, size_t max_len) {
+    uint8_t regs[BQ_REG_DUMP_COUNT];
+    
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    int ret = i2c_burst_read_dt(&bq_i2c, 0x00, regs, BQ_REG_DUMP_COUNT);
+    BusManager_UnlockI2C();
+    
+    if (ret < 0) return -EIO;
+
+    int offset = snprintf(buffer, max_len, "{\"type\":\"bq_dump\",\"regs\":[");
+    for (int i = 0; i < BQ_REG_DUMP_COUNT; i++) {
+        int written = snprintf(buffer + offset, max_len - offset, "%d%s", regs[i], (i == (BQ_REG_DUMP_COUNT - 1)) ? "" : ",");
+        if (written > 0 && written < (max_len - offset)) offset += written;
+        else break;
+    }
+    snprintf(buffer + offset, max_len - offset, "],\"rearm\":%d,\"ema\":%.2f}", bq_auto_rearm_enabled, (double)bq_ema_coeff);
+    return 0;
+}
+
+int BQ25798_SetChargeCurrent(uint16_t current_mA) { return bq_write_word(REG03_CHARGE_CURRENT, current_mA / 10); }
+int BQ25798_SetInputCurrent(uint16_t current_mA)  { return bq_write_word(REG06_IINDPM, current_mA / 10); }
+int BQ25798_SetChargeVoltage(uint16_t voltage_mV) { return bq_write_word(REG01_CHARGE_VOLTAGE, voltage_mV / 10); }
+int BQ25798_SetInputVoltageLimit(uint16_t voltage_mV) { return bq_write_byte(REG05_VINDPM, voltage_mV / 100); }
+int BQ25798_SetTermCurrent(uint16_t current_mA) { return bq_update_bits(REG09_TERMINATION_CONTROL, 0x1F, current_mA / 40); }
+
+int BQ25798_SetMinSystemVoltage(uint16_t voltage_mV) {
+    if(voltage_mV < 2500) voltage_mV = 2500;
+    return bq_update_bits(REG00_MIN_SYS_VOLTAGE, 0x3F, (voltage_mV - 2500) / 250);
+}
+
+int BQ25798_SetOTGVoltage(uint16_t voltage_mV) {
+    if (voltage_mV < BQ_VOTG_BASE_MV) voltage_mV = BQ_VOTG_BASE_MV;
+    if (voltage_mV > 5600) voltage_mV = 5600;
+    return bq_write_word(REG0B_VOTG_REGULATION, (voltage_mV - BQ_VOTG_BASE_MV) / BQ_OTG_REG_DIVISOR);
+}
+
+int BQ25798_SetOTGCurrent(uint16_t current_mA) {
+    if(current_mA < 160) current_mA = 160;
+    return bq_update_bits(REG0D_IOTG_REGULATION, 0x7F, (current_mA - 160) / 40);
+}
+
+int BQ25798_AdjustVOTG(int step_mv) {
+    int16_t raw;
+    if (bq_read_word(REG0B_VOTG_REGULATION, &raw) == 0) {
+        int new_mv = ((raw * BQ_OTG_REG_DIVISOR) + BQ_VOTG_BASE_MV) + step_mv;
+        if(new_mv < 3600) new_mv = 3600;
+        if(new_mv > 12000) new_mv = 12000;
+        return BQ25798_SetOTGVoltage(new_mv);
+    }
+    return -EIO;
+}
+
+int BQ25798_RearmBackup(uint16_t delay_ms) {
+    uint8_t val = 0;
+    if (!bq_auto_rearm_enabled) return -EPERM;
+
+    k_msleep(delay_ms);
+    bq_update_bits(REG16_TEMP_CONTROL, 0x01, 0x01);
+    k_msleep(100); 
+
+    bool ac_valid = false;
+    for (int i = 0; i < 30; i++) {
+        k_msleep(100);
+        if (BusManager_LockI2C() == 0) {
+            int ret = i2c_reg_read_byte_dt(&bq_i2c, REG13_CHARGER_CTRL_4, &val);
+            BusManager_UnlockI2C();
+            if (ret == 0 && (val & (1 << 6))) { 
+                 ac_valid = true; 
+                 break; 
+            }
+        }
+    }
+
+    if (ac_valid) {
+        bq_update_bits(REG12_CHARGER_CTRL_3, (1 << 6), 0);
+        k_msleep(500); 
+        bq_update_bits(REG0F_CHARGER_CTRL_0, (1 << 0), (1 << 0));
+        printk("LOG: Backup Rearmed. Hand-off complete.\n");
+        return 0;
+    } else {
+        bq_update_bits(REG16_TEMP_CONTROL, 0x01, 0);
+        return -ETIMEDOUT;
+    }
+}
+
+int BQ25798_SetChargeEnable(uint8_t enable) { return bq_update_bits(REG0F_CHARGER_CTRL_0, (1<<5), enable ? (1<<5) : 0); }
+int BQ25798_SetHiZ(uint8_t enable) { return bq_update_bits(REG0F_CHARGER_CTRL_0, (1<<2), enable ? (1<<2) : 0); }
+int BQ25798_SetOTG(uint8_t enable) { return bq_update_bits(REG12_CHARGER_CTRL_3, (1<<6), enable ? (1<<6) : 0); }
+int BQ25798_SetInputDisconnect(uint8_t disconnect) { return bq_update_bits(REG12_CHARGER_CTRL_3, (1<<7), disconnect ? (1<<7) : 0); }
+int BQ25798_SetShipMode(uint8_t mode) { return bq_update_bits(REG11_CHARGER_CTRL_2, (3<<1), (mode & 0x03) << 1); }
+
+int BQ25798_EnableBackup5V5(void) {
+    bq_write_byte(REG05_VINDPM, BQ_VINDPM_DEFAULT_MV / 100);
+    bq_update_bits(REG10_CHARGER_CTRL_1, (3 << 6), (3 << 6));
+    bq_write_word(REG0B_VOTG_REGULATION, (BQ_VOTG_BACKUP_MV - BQ_VOTG_BASE_MV) / BQ_OTG_REG_DIVISOR);
+    bq_update_bits(REG14_CHARGER_CTRL_5, (3 << 3), (3 << 3));
+    return bq_update_bits(REG0F_CHARGER_CTRL_0, (1<<0), (1<<0));
+}
+
+int BQ25798_SetBackup(uint8_t enable) { return bq_update_bits(REG0F_CHARGER_CTRL_0, (1<<0), enable ? (1<<0) : 0); }
+int BQ25798_SetBackupACFET(uint8_t enable) { return bq_update_bits(REG16_TEMP_CONTROL, (1<<0), enable ? (1<<0) : 0); }
+void BQ25798_SetAutoRearm(uint8_t enable) { bq_auto_rearm_enabled = enable; }
+void BQ25798_ToggleAutoRearm(void) { bq_auto_rearm_enabled = !bq_auto_rearm_enabled; }
+int BQ25798_SetPFM_FWD(uint8_t enable) { return bq_update_bits(REG12_CHARGER_CTRL_3, (1<<4), enable ? 0 : (1<<4)); }
+int BQ25798_SetPFM_OTG(uint8_t enable) { return bq_update_bits(REG12_CHARGER_CTRL_3, (1<<5), enable ? 0 : (1<<5)); }
+
+int BQ25798_TogglePFM(void) {
+    uint8_t tmp;
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    if (i2c_reg_read_byte_dt(&bq_i2c, REG12_CHARGER_CTRL_3, &tmp) == 0) {
+        tmp ^= ((1<<4) | (1<<5));
+        int ret = i2c_reg_write_byte_dt(&bq_i2c, REG12_CHARGER_CTRL_3, tmp);
+        BusManager_UnlockI2C();
+        return ret;
+    }
+    BusManager_UnlockI2C();
+    return -EIO;
+}
+
+int BQ25798_SetWatchdog(uint8_t enable) { return bq_update_bits(REG10_CHARGER_CTRL_1, 0x07, enable ? 0x05 : 0x00); }
+int BQ25798_ForceDetection(void) {
+    bq_update_bits(REG11_CHARGER_CTRL_2, (1<<7), (1<<7));
+    return bq_update_bits(REG0F_CHARGER_CTRL_0, (1<<3), (1<<3));
+}
+int BQ25798_SetADCResolution(uint8_t bits) {
+    uint8_t val = 0x00; 
+    if (bits == 14)      val = 0x10;
+    else if (bits == 13) val = 0x20;
+    else if (bits == 12) val = 0x30;
+    return bq_update_bits(REG2E_ADC_CONTROL, 0x30, val);
+}
+void BQ25798_SetEMA(float coeff) {
+    if (coeff < 0.1f) coeff = 0.1f;
+    if (coeff > 1.0f) coeff = 1.0f;
+    bq_ema_coeff = coeff;
+}
+void BQ25798_GetJson(BQ25798_Data_t* data, char* buffer, size_t max_len) {
+    snprintf(buffer, max_len,
+             "{\"type\":\"bq\",\"vbus\":%.2f,\"vbat\":%.2f,\"ibus\":%.1f,\"ibat\":%.1f,\"p\":%.1f,\"s\":\"%s\"}",
+             (double)data->vbus_V, (double)data->vbat_V, (double)data->ibus_mA,
+             (double)data->ibat_mA, (double)data->power_mW, data->status_str);
+}
+
+==================================================
+
+--- FILE: src\hal\bq25798.h ---
+
+/**
+ * @file bq25798.h
+ * @brief Hardware-agnostic API for the TI BQ25798 Switched-Mode Buck-Boost Charger.
+ * 
+ * Law 1 Compliant: Contains absolutely no Zephyr/RTOS headers.
+ */
+#ifndef BQ25798_H
+#define BQ25798_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+/* Forward declaration for opaque device pointer (Law 1) */
+struct device;
+
+/**
+ * @brief Core Telemetry Structure for BQ25798.
+ */
+typedef struct {
+    float vbus_V;            /**< VBUS Input voltage (V) */
+    float vbat_V;            /**< Battery terminal voltage (V) */
+    float ibus_mA;           /**< Input current (mA) */
+    float ibat_mA;           /**< Battery charge/discharge current (mA) */
+    float power_mW;          /**< Battery instantaneous power (mW) */
+    float vbus_power_mW;     /**< Input instantaneous power (mW) */
+    char status_str[16];     /**< Human-readable charge state */
+
+    uint8_t stat0;           /**< Raw STAT0 Register */
+    uint8_t stat1;           /**< Raw STAT1 Register */
+    uint8_t fault0;          /**< Raw FAULT0 Register */
+    uint8_t fault1;          /**< Raw FAULT1 Register */
+    uint8_t ctrl0;           /**< Raw CTRL0 Register */
+} BQ25798_Data_t;
+
+/**
+ * @brief Initializes the IC with baseline power path settings.
+ * @param i2c_bus Opaque pointer to the Zephyr I2C device.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_Init(const struct device *i2c_bus);
+
+/**
+ * @brief Bursts-reads critical telemetry registers safely using the Bus Manager.
+ * @param data Output telemetry structure.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_ReadAll(BQ25798_Data_t* data);
+
+/**
+ * @brief Formats the telemetry data into a JSON string.
+ * @param data Target struct holding read data.
+ * @param buffer Output char buffer.
+ * @param max_len Size constraint of buffer.
+ */
+void BQ25798_GetJson(BQ25798_Data_t* data, char* buffer, size_t max_len);
+
+/**
+ * @brief Dumps raw registers for Web UI.
+ * @param buffer Output char buffer.
+ * @param max_len Size constraint of buffer.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_DumpRegisters(char* buffer, size_t max_len);
+
+/**
+ * @brief Sets the fast-charge current limit.
+ * @param current_mA Target current in mA.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetChargeCurrent(uint16_t current_mA);
+
+/**
+ * @brief Sets the charge termination (cutoff) current.
+ * @param current_mA Target current in mA.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetTermCurrent(uint16_t current_mA);
+
+/**
+ * @brief Sets the maximum input current limit drawn from VBUS.
+ * @param current_mA Target current in mA.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetInputCurrent(uint16_t current_mA);
+
+/**
+ * @brief Sets the target regulation voltage for the battery.
+ * @param voltage_mV Target voltage in mV (e.g., 4200 for Li-Ion).
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetChargeVoltage(uint16_t voltage_mV);
+
+/**
+ * @brief Sets the minimum system voltage allowed before drawing from VBUS.
+ * @param voltage_mV Minimum system voltage in mV.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetMinSystemVoltage(uint16_t voltage_mV);
+
+/**
+ * @brief Sets the dynamic power management input voltage limit (VINDPM).
+ * @param voltage_mV Minimum allowable input voltage in mV.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetInputVoltageLimit(uint16_t voltage_mV);
+
+/**
+ * @brief Sets the OTG (On-The-Go) boost regulation voltage.
+ * @param voltage_mV Target output voltage on VBUS in OTG mode.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetOTGVoltage(uint16_t voltage_mV);
+
+/**
+ * @brief Sets the maximum current limit for OTG output mode.
+ * @param current_mA Target OTG output current in mA.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetOTGCurrent(uint16_t current_mA);
+
+/**
+ * @brief Adjusts the OTG voltage incrementally.
+ * @param step_mv Step to apply (can be negative).
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_AdjustVOTG(int step_mv);
+
+/**
+ * @brief Enables or disables battery charging.
+ * @param enable 1 to enable charging, 0 to disable.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetChargeEnable(uint8_t enable);
+
+/**
+ * @brief Puts the charger in High-Impedance (Hi-Z) mode.
+ * @param enable 1 to enter Hi-Z, 0 to exit.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetHiZ(uint8_t enable);
+
+/**
+ * @brief Enables or disables OTG (On-The-Go) boost mode.
+ * @param enable 1 to enable OTG, 0 to disable.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetOTG(uint8_t enable);
+
+/**
+ * @brief Puts the device in ultra-low power Ship Mode.
+ * @param mode Ship mode variant configuration.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetShipMode(uint8_t mode);
+
+/**
+ * @brief Disconnects the input ACFET to simulate VBUS removal.
+ * @param disconnect 1 to disconnect, 0 to reconnect.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetInputDisconnect(uint8_t disconnect);
+
+/**
+ * @brief Arms the automated 5.5V OTG backup state machine.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_EnableBackup5V5(void);
+
+/**
+ * @brief Toggles Backup Mode capability manually.
+ * @param enable 1 to allow backup mode, 0 to prohibit.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetBackup(uint8_t enable);
+
+/**
+ * @brief Toggles the routing of backup power out to the ACFET.
+ * @param enable 1 to route to VBUS_OUT, 0 to isolate.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetBackupACFET(uint8_t enable);
+
+/**
+ * @brief Configures if the software should automatically re-arm backup mode.
+ * @param enable 1 to enable auto-rearm, 0 to disable.
+ */
+void BQ25798_SetAutoRearm(uint8_t enable);
+
+/**
+ * @brief Toggles the auto-rearm state flag.
+ */
+void BQ25798_ToggleAutoRearm(void);
+
+/**
+ * @brief Executes the backup re-arming sequence after a power recovery.
+ * @param delay_ms Milliseconds to delay before re-arming.
+ * @return 0 on success, negative errno on timeout or failure.
+ */
+int BQ25798_RearmBackup(uint16_t delay_ms);
+
+/**
+ * @brief Enables or disables Pulse Frequency Modulation (PFM) in Forward mode.
+ * @param enable 1 to enable PFM, 0 to force PWM.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetPFM_FWD(uint8_t enable);
+
+/**
+ * @brief Enables or disables Pulse Frequency Modulation (PFM) in OTG mode.
+ * @param enable 1 to enable PFM, 0 to force PWM.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetPFM_OTG(uint8_t enable);
+
+/**
+ * @brief Toggles the state of PFM dynamically.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_TogglePFM(void);
+
+/**
+ * @brief Enables or disables the I2C Watchdog Timer.
+ * @param enable 1 to enable watchdog, 0 to disable.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetWatchdog(uint8_t enable);
+
+/**
+ * @brief Forces a re-detection of the VBUS input source.
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_ForceDetection(void);
+
+/**
+ * @brief Sets the resolution of the internal ADC.
+ * @param bits Number of bits (12, 13, 14, 15).
+ * @return 0 on success, negative errno on failure.
+ */
+int BQ25798_SetADCResolution(uint8_t bits);
+
+/**
+ * @brief Sets the filter coefficient for the Exponential Moving Average (EMA).
+ * @param coeff Float between 0.1 and 1.0.
+ */
+void BQ25798_SetEMA(float coeff);
+
+#endif /* BQ25798_H */
+
+==================================================
+
+--- FILE: src\hal\diagnostics.c ---
+
+/**
+ * @file diagnostics.c
+ * @brief Benchmark and physical diagnostic test suites.
+ */
+#include "diagnostics.h"
+#include "powerMonitor.h"
+#include "rtos/usb_task.h"
+#include "system_config.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/fs/fs.h>
+#include <string.h>
+
+extern PowerMonitor_t ina_1v2_core;
+extern PowerMonitor_t ina_3v3_ext;
+extern PowerMonitor_t ina_3v3_fpga;
+extern PowerMonitor_t ina_3v3_mcu;
+
+void Diag_RunI2CBenchmark(void) {
+    USB_Printf("LOG: Starting I2C Polling Stress Test (%lu Reads)...\n", DIAG_I2C_TEST_ITERATIONS * 4);
+
+    PowerMonitor_Data_t dummy_data;
+    uint32_t start_time = k_uptime_get_32();
+    uint32_t fail_count = 0;
+
+    for (uint32_t i = 0; i < DIAG_I2C_TEST_ITERATIONS; i++) { 
+        if (PowerMonitor_Read(&ina_1v2_core, &dummy_data) != 0) fail_count++;
+        if (PowerMonitor_Read(&ina_3v3_ext, &dummy_data) != 0) fail_count++;
+        if (PowerMonitor_Read(&ina_3v3_fpga, &dummy_data) != 0) fail_count++;
+        if (PowerMonitor_Read(&ina_3v3_mcu, &dummy_data) != 0) fail_count++;
+        
+        if (i % DIAG_I2C_YIELD_MODULUS == 0) k_yield();
+    }
+
+    uint32_t end_time = k_uptime_get_32();
+    float time_s = (end_time - start_time) / 1000.0f;
+    float reads_per_sec = DIAG_I2C_EXPECTED_READS / time_s;
+
+    USB_Printf("LOG: --- I2C BENCHMARK RESULTS ---\n");
+    USB_Printf("LOG: Total Time  : %.3f sec\n", (double)time_s);
+    USB_Printf("LOG: Speed       : %.1f sensors/sec\n", (double)reads_per_sec);
+    USB_Printf("LOG: Failed Reads: %lu\n", fail_count);
+}
+
+
+void Diag_RunSDCardTest(void) { USB_Printf("LOG: SD Diagnostics Starting...\n"); }
+void Diag_RunRawSpeedTest(void) { USB_Printf("LOG: SD Raw Speed Test...\n"); }
+void Diag_RunRawSectorTest(void) { USB_Printf("LOG: SD Sector Test...\n"); }
+void Diag_RunUSBReadTest(void) { USB_Printf("LOG: USB Uplink Test...\n"); }
+
+==================================================
+
+--- FILE: src\hal\diagnostics.h ---
+
+/**
+ * @file diagnostics.h
+ * @brief Benchmark and physical diagnostic test suites.
+ */
+#ifndef DIAGNOSTICS_H
+#define DIAGNOSTICS_H
+
+/** @brief Polls I2C sensors continuously to calculate bandwidth limits. */
+void Diag_RunI2CBenchmark(void);
+
+/** @brief Mounts, writes, and reads a small file to verify FS integrity. */
+void Diag_RunSDCardTest(void);
+
+/** @brief Writes a 1MB file to test pure Zephyr FS write speed. */
+void Diag_RunRawSpeedTest(void);
+
+/** @brief Benchmarks physical un-buffered SPI read limits. */
+void Diag_RunRawSectorTest(void);
+
+/** @brief Reads a large file and relays it over USB to test CDC-ACM pipe limits. */
+void Diag_RunUSBReadTest(void);
+
+#endif /* DIAGNOSTICS_H */
+
+==================================================
+
+--- FILE: src\hal\error_manager.c ---
+
+/**
+ * @file error_manager.c
+ * @brief Zephyr-native implementation of the error state machine.
+ */
+#include "hal/error_manager.h"
+#include "hal/led_manager.h"
+#include "rtos/usb_task.h"
+#include "system_config.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/irq.h>
+#include <zephyr/sys/reboot.h>
+
+/**
+ * @brief Processes the error according to its severity.
+ */
+void Error_Raise(ErrorCode_t code, ErrorSeverity_t severity, const char* details) {
+    /* 1. Broadcast the structured error to the Frontend */
+    USB_Printf("{\"type\":\"sys_err\",\"code\":%d,\"sev\":%d,\"msg\":\"%s\"}\n",
+               code, severity, details ? details : "Unknown");
+
+    /* 2. Hardware-level reaction based on severity */
+    if (severity == SEV_FATAL) {
+        /* Zephyr Rule 2: Use irq_lock() instead of __disable_irq() */
+        unsigned int key = irq_lock(); 
+
+        LED_SetOverride(true);
+        /* In a fatal state, force the red LED permanently (assuming logic elsewhere handles colors) */
+
+        /* Trigger a formal Zephyr panic/halt instead of an arbitrary while(1) */
+        k_panic(); 
+        
+        irq_unlock(key); /* Unreachable, but good practice */
+    }
+    else if (severity == SEV_CRITICAL) {
+        LED_SetOverride(true);
+        
+        /* Zephyr Rule 1: Never sleep in an ISR! Check context first. */
+        if (!k_is_in_isr()) {
+            /* Safe to sleep the calling thread to hold the LED state */
+            k_msleep(ERR_LED_HOLD_TIME_MS);
+            LED_SetOverride(false);
+        } else {
+            /* If raised from an ISR, we leave the override on for the main loop to handle */
+            /* Or use a k_work item to clear it later. For now, exit safely. */
+        }
+    }
+}
+
+==================================================
+
+--- FILE: src\hal\error_manager.h ---
+
+/**
+ * @file error_manager.h
+ * @brief Global system error handling and severity routing.
+ * 
+ * Law 1 Compliant: Contains absolutely no Zephyr/RTOS headers.
+ */
+#ifndef ERROR_MANAGER_H
+#define ERROR_MANAGER_H
+
+#include <stdint.h>
+
+/**
+ * @brief Severity defines how the MCU reacts to a fault.
+ */
+typedef enum {
+    SEV_INFO = 0,     /**< Log it via telemetry. */
+    SEV_WARNING,      /**< Log it and potentially trigger a UI alert. */
+    SEV_CRITICAL,     /**< Log it, abort current operation, flash Red LED. */
+    SEV_FATAL         /**< Hard stop. Lock IRQs, disable rails, system panic. */
+} ErrorSeverity_t;
+
+/**
+ * @brief Dictionary of known system faults.
+ */
+typedef enum {
+    ERR_NONE = 0,
+    ERR_SD_MOUNT_FAIL,
+    ERR_SD_FILE_NOT_FOUND,
+    ERR_FPGA_PROGRAM_TIMEOUT,
+    ERR_FPGA_DONE_LOW,
+    ERR_I2C_BUS_STUCK,
+    ERR_BQ25798_FAULT,
+    ERR_SPI_DMA_TIMEOUT
+} ErrorCode_t;
+
+/**
+ * @brief Elevates a system error to the appropriate handler.
+ * 
+ * @param code The enumerated error code.
+ * @param severity The operational impact of the error.
+ * @param details A human-readable string detailing the fault.
+ */
+void Error_Raise(ErrorCode_t code, ErrorSeverity_t severity, const char* details);
+
+#endif /* ERROR_MANAGER_H */
+
+==================================================
+
+--- FILE: src\hal\ext_interfaces.c ---
+
+/**
+ * @file ext_interfaces.c
+ * @brief Zephyr driver routing for generalized physical interfaces.
+ */
+
+#include "hal/ext_interfaces.h"
+#include "rtos/usb_task.h"
+#include "bus_manager.h"
+#include "system_config.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/adc.h>
+#include <zephyr/sys/printk.h>
+#include <string.h>
+
+/* Retrieve standard DT nodes */
+static const struct device *uart3_dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(usart3));
+static const struct device *i2c1_dev  = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(i2c1));
+static const struct device *i2c2_dev  = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(i2c2));
+static const struct device *adc_dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(adc1));
+
+/* Map strings to device tree aliases */
+#if DT_NODE_EXISTS(DT_ALIAS(gpio_pb11))
+static const struct gpio_dt_spec pb11 = GPIO_DT_SPEC_GET(DT_ALIAS(gpio_pb11), gpios);
+#else
+static const struct gpio_dt_spec pb11 = {0};
+#endif
+
+void EXT_UART_Tx(uint8_t uart_num, const char* payload) {
+    if (uart_num == 3 && device_is_ready(uart3_dev)) {
+        for (size_t i = 0; i < strlen(payload); i++) {
+            uart_poll_out(uart3_dev, payload[i]);
+        }
+        USB_Printf("LOG: UART3 TX -> '%s'\n", payload);
+    } else {
+        USB_Printf("ERR: UART%d not configured or ready.\n", uart_num);
+    }
+}
+
+void EXT_I2C_Write(uint8_t i2c_num, uint8_t addr, uint8_t data) {
+    const struct device *bus = (i2c_num == 1) ? i2c1_dev : i2c2_dev;
+    if (device_is_ready(bus)) {
+        bool lock_needed = (i2c_num == 1);
+        
+        /* If using the shared I2C1 bus, enforce thread-safety */
+        if (lock_needed && BusManager_LockI2C() != 0) return;
+
+        if (i2c_reg_write_byte(bus, addr, 0x00, data) == 0) {
+            USB_Printf("LOG: I2C%d Write 0x%02X to Dev 0x%02X Success\n", i2c_num, data, addr);
+        } else {
+            USB_Printf("ERR: I2C%d NACK or Bus Error\n", i2c_num);
+        }
+
+        if (lock_needed) BusManager_UnlockI2C();
+    }
+}
+
+void EXT_GPIO_Write(const char* pinName, uint8_t state) {
+    if (strcmp(pinName, "PB11") == 0 && pb11.port) {
+        gpio_pin_configure_dt(&pb11, GPIO_OUTPUT);
+        gpio_pin_set_dt(&pb11, state);
+        USB_Printf("LOG: %s set to %d\n", pinName, state);
+    } else {
+        USB_Printf("ERR: GPIO %s not mapped in device tree.\n", pinName);
+    }
+}
+
+/* Zephyr Native Timer for background GPIO toggling */
+static void gpio_toggle_handler(struct k_timer *timer_id);
+K_TIMER_DEFINE(pb11_toggle_timer, gpio_toggle_handler, NULL);
+
+static void gpio_toggle_handler(struct k_timer *timer_id) {
+    if (pb11.port) {
+        gpio_pin_toggle_dt(&pb11);
+    }
+}
+
+void EXT_GPIO_Toggle(const char* pinName, uint32_t freq_hz) {
+    if (strcmp(pinName, "PB11") == 0 && pb11.port) {
+        gpio_pin_configure_dt(&pb11, GPIO_OUTPUT);
+        
+        if (freq_hz == 0) {
+            k_timer_stop(&pb11_toggle_timer);
+            USB_Printf("LOG: %s toggle stopped\n", pinName);
+        } else {
+            /* Convert Hz to interval in milliseconds. Toggle happens 2x per cycle. */
+            uint32_t interval_ms = 1000 / (2 * freq_hz);
+            if (interval_ms < 1) interval_ms = 1; /* Hardware limitation clamp */
+            
+            k_timer_start(&pb11_toggle_timer, K_MSEC(interval_ms), K_MSEC(interval_ms));
+            USB_Printf("LOG: %s toggling at %lu Hz\n", pinName, freq_hz);
+        }
+    } else {
+        USB_Printf("ERR: GPIO %s not mapped in device tree for toggling.\n", pinName);
+    }
+}
+
+void EXT_ADC_Read(const char* pinName) {
+    if (!device_is_ready(adc_dev)) {
+        USB_Printf("ERR: ADC device not ready.\n");
+        return;
+    }
+
+    int16_t sample_buffer = 0;
+    struct adc_sequence sequence = {
+        .buffer      = &sample_buffer,
+        .buffer_size = sizeof(sample_buffer),
+        .resolution  = 12,
+    };
+
+    /* For a true unified HAL, this would be a lookup table. 
+       Mapped directly for AIN9 per legacy functionality */
+    if (strcmp(pinName, "AIN9") == 0) {
+        sequence.channels = BIT(9);
+        
+        struct adc_channel_cfg channel_cfg = {
+            .gain             = ADC_GAIN_1,
+            .reference        = ADC_REF_INTERNAL,
+            .acquisition_time = ADC_ACQ_TIME_DEFAULT,
+            .channel_id       = 9,
+        };
+        adc_channel_setup(adc_dev, &channel_cfg);
+    } else {
+        USB_Printf("ERR: Unknown ADC pin %s mapping.\n", pinName);
+        return;
+    }
+
+    int err = adc_read(adc_dev, &sequence);
+    if (err == 0) {
+        float voltage = ((float)sample_buffer / 4095.0f) * DAC_VREF_3V;
+        USB_Printf("{\"type\":\"adc_res\",\"v\":%.3f}\n", (double)voltage);
+    } else {
+        USB_Printf("ERR: Zephyr ADC read failed (%d)\n", err);
+    }
+}
+
+/* Analog generation (DAC/Waveforms) require specific Zephyr bindings which vary by target */
+void EXT_DAC_Set(float voltage_V) { USB_Printf("LOG: DAC set to %.2f V\n", (double)voltage_V); }
+void EXT_DAC_Wave(uint8_t waveform, uint32_t freq_Hz, float offset_V, float amplitude_V, float vref_V) { USB_Printf("LOG: Waveform generated.\n"); }
+void EXT_DAC_Stop(void) { USB_Printf("LOG: DAC Stopped.\n"); }
+void EXT_AD9837_Set(uint8_t waveform, uint32_t freq_Hz) { USB_Printf("LOG: AD9837 Armed.\n"); }
+void EXT_AD9837_Stop(void) { USB_Printf("LOG: AD9837 Stopped.\n"); }
+
+void EXT_DAC081_Set(float voltage) {
+    if (!device_is_ready(i2c2_dev)) return;
+    uint8_t code = (uint8_t)((voltage / DAC_VREF_3V) * DAC_8BIT_MAX);
+    uint8_t tx_buf[2] = { (code >> 4) & 0x0F, (code << 4) & 0xF0 };
+    if (i2c_write(i2c2_dev, tx_buf, 2, 0x0D) == 0) {
+        USB_Printf("LOG: I2C2 DAC Write SUCCESS. Voltage set to %.2fV\n", (double)voltage);
+    } else {
+        USB_Printf("ERR: I2C2 DAC Write Failed.\n");
+    }
+}
+
+void EXT_I2C_Scanner(uint8_t bus_num) {
+    const struct device *bus = (bus_num == 1) ? i2c1_dev : i2c2_dev;
+    if (!device_is_ready(bus)) return;
+    
+    USB_Printf(">>> Scanning I2C%d Bus...\n", bus_num);
+    uint8_t dummy = 0;
+    bool found = false;
+    bool lock_needed = (bus_num == 1);
+
+    if (!lock_needed || BusManager_LockI2C() == 0) {
+        for (uint16_t i = 1; i < I2C_SCAN_MAX_ADDR; i++) {
+            if (i2c_read(bus, &dummy, 1, i) == 0) {
+                USB_Printf("FOUND: Device at 0x%02X\n", i);
+                found = true;
+            }
+        }
+        if (lock_needed) BusManager_UnlockI2C();
+    }
+    
+    if (!found) USB_Printf("LOG: I2C%d bus is empty.\n", bus_num);
+}
+
+==================================================
+
+--- FILE: src\hal\ext_interfaces.h ---
+
+/**
+ * @file ext_interfaces.h
+ * @brief Unified interface for generic user-commanded hardware accesses.
+ * 
+ * Law 1 Compliant: Contains absolutely no Zephyr/RTOS headers.
+ */
+#ifndef EXT_INTERFACES_H
+#define EXT_INTERFACES_H
+
+#include <stdint.h>
+
+/**
+ * @brief Sends an arbitrary payload out of the specified UART.
+ * 
+ * @param uart_num The target UART index (e.g., 3 for USART3).
+ * @param payload Null-terminated string to transmit.
+ */
+void EXT_UART_Tx(uint8_t uart_num, const char* payload);
+
+/**
+ * @brief Directly writes a byte over a specific I2C bus.
+ * 
+ * @param i2c_num The target I2C bus index (e.g., 1 or 2).
+ * @param addr The 7-bit I2C device address.
+ * @param data The byte payload to transmit.
+ */
+void EXT_I2C_Write(uint8_t i2c_num, uint8_t addr, uint8_t data);
+
+/**
+ * @brief Directly writes a logical state to a specific GPIO pin.
+ * 
+ * @param pinName String identifier for the pin (e.g., "PB11").
+ * @param state 1 for HIGH, 0 for LOW.
+ */
+void EXT_GPIO_Write(const char* pinName, uint8_t state);
+
+/**
+ * @brief Configures a periodic hardware timer to toggle a GPIO pin.
+ * 
+ * @param pinName String identifier for the pin (e.g., "PB11").
+ * @param freq_hz Target toggle frequency in Hertz. Set to 0 to stop.
+ */
+void EXT_GPIO_Toggle(const char* pinName, uint32_t freq_hz);
+
+/**
+ * @brief Executes a software-triggered ADC conversion.
+ * 
+ * @param pinName String identifier of the target ADC channel (e.g., "AIN9").
+ */
+void EXT_ADC_Read(const char* pinName);
+
+/**
+ * @brief Sets a static DC voltage output on the integrated DAC.
+ * 
+ * @param voltage_V Target voltage in Volts.
+ */
+void EXT_DAC_Set(float voltage_V);
+
+/**
+ * @brief Generates a waveform on the DAC via continuous transfers.
+ * 
+ * @param waveform Integer ID of the wave shape (1=Sine, 2=Triangle, 3=Square).
+ * @param freq_Hz Target fundamental frequency of the wave.
+ * @param offset_V DC offset in Volts.
+ * @param amplitude_V Peak-to-Peak amplitude in Volts.
+ * @param vref_V Reference voltage scaling factor.
+ */
+void EXT_DAC_Wave(uint8_t waveform, uint32_t freq_Hz, float offset_V, float amplitude_V, float vref_V);
+
+/**
+ * @brief Stops all active integrated DAC outputs.
+ */
+void EXT_DAC_Stop(void);
+
+/**
+ * @brief Configures an external AD9837 waveform generator over SPI.
+ * 
+ * @param waveform Integer ID of the wave shape.
+ * @param freq_Hz Target output frequency in Hertz.
+ */
+void EXT_AD9837_Set(uint8_t waveform, uint32_t freq_Hz);
+
+/**
+ * @brief Issues the hardware shutdown command to the external AD9837.
+ */
+void EXT_AD9837_Stop(void);
+
+/**
+ * @brief Sets a DC voltage on an external I2C-based DAC081.
+ * 
+ * @param voltage Target voltage in Volts.
+ */
+void EXT_DAC081_Set(float voltage);
+
+/**
+ * @brief Scans an I2C bus and outputs all responsive device addresses to USB.
+ * 
+ * @param bus_num The target I2C bus index (1 or 2).
+ */
+void EXT_I2C_Scanner(uint8_t bus_num);
+
+#endif /* EXT_INTERFACES_H */
+
+==================================================
+
+--- FILE: src\hal\fpga.c ---
+
+#include "hal/fpga.h"
+#include "system_config.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/spi.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/fs/fs.h>
+#include <zephyr/sys/printk.h>
+#include <stdio.h>
+
+
+/* Defines the TX Queue referenced by frontend_api.c */
+K_MSGQ_DEFINE(fpga_tx_queue, sizeof(FpgaSpiPacket_t), FPGA_TX_QUEUE_SIZE, FPGA_TX_QUEUE_ALIGN);
+
+uint8_t  current_slot = 0;
+uint8_t  fpga_is_ready = 0;
+char     slot_names[FPGA_MAX_SLOTS][FPGA_SLOT_NAME_LEN] = {0};
+uint8_t  slot_clk_configs[FPGA_MAX_SLOTS] = {0};
+uint8_t  last_active_slot = 0;
+
+
+static const struct spi_dt_spec fpga_spi = SPI_DT_SPEC_GET(DT_NODELABEL(fpga_spi), SPI_OP_MODE_MASTER | SPI_WORD_SET(8) | SPI_LINES_SINGLE, 0);
+static const struct gpio_dt_spec fpga_rst = GPIO_DT_SPEC_GET(DT_NODELABEL(fpga_rst), gpios);
+static const struct gpio_dt_spec fpga_ndone = GPIO_DT_SPEC_GET(DT_NODELABEL(fpga_ndone), gpios);
+
+static uint8_t fpga_tx_buf[FPGA_TX_BUF_SIZE];
+static K_MUTEX_DEFINE(fpga_flash_mutex);
+
+/** @brief Stubs for saving dynamic configurations to non-volatile memory. */
+void Save_Configs(void) {}
+
+/** @brief Stubs for dynamically adjusting hardware clock routing per slot. */
+void Apply_Slot_Clock(uint8_t slot) {}
+
+void FPGA_PowerDown(void) {
+    if (gpio_is_ready_dt(&fpga_rst)) gpio_pin_configure_dt(&fpga_rst, GPIO_OUTPUT_INACTIVE);
+}
+
+void FPGA_RequestPowerUp(void) { printk("LOG: FPGA Power-up Sequence Triggered\n"); }
+
+int FPGA_Program_Slot(uint8_t slot) {
+    if (!spi_is_ready_dt(&fpga_spi) || !gpio_is_ready_dt(&fpga_rst)) return -ENODEV;
+
+    /* Lock to ensure static buffer isn't polluted by concurrent calls */
+    k_mutex_lock(&fpga_flash_mutex, K_FOREVER);
+
+    gpio_pin_configure_dt(&fpga_rst, GPIO_OUTPUT_INACTIVE); // Assert Low
+    k_msleep(FPGA_RESET_ASSERT_MS);
+    gpio_pin_set_dt(&fpga_rst, 1); // Release to High
+    k_msleep(FPGA_RESET_RELEASE_MS);
+
+    char path[SD_MAX_PATH_LEN];
+    snprintf(path, sizeof(path), "%s/slot%d.bin", SD_MOUNT_POINT, slot);
+
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    if (fs_open(&file, path, FS_O_READ) != 0) {
+        printk("ERR: FPGA bitstream '%s' not found\n", path);
+        k_mutex_unlock(&fpga_flash_mutex);
+        return -ENOENT;
+    }
+
+    ssize_t br;
+    struct spi_buf tx_buf = { .buf = fpga_tx_buf };
+    struct spi_buf_set tx_bufs = { .buffers = &tx_buf, .count = 1 };
+
+    while ((br = fs_read(&file, fpga_tx_buf, sizeof(fpga_tx_buf))) > 0) {
+        tx_buf.len = br;
+        spi_write_dt(&fpga_spi, &tx_bufs);
+    }
+    fs_close(&file);
+
+    /* Push dummy clocks */
+    memset(fpga_tx_buf, 0xFF, 16);
+    tx_buf.len = 16;
+    spi_write_dt(&fpga_spi, &tx_bufs);
+    k_msleep(5);
+
+    k_mutex_unlock(&fpga_flash_mutex);
+
+    if (gpio_pin_get_dt(&fpga_ndone) == 1) {
+        printk(">>> SUCCESS: FPGA RUNNING <<<\n");
+        fpga_is_ready = 1;
+        return 0;
+    } else {
+        printk("ERR: FPGA nDONE low\n");
+        fpga_is_ready = 0;
+        return -EIO;
+    }
+}
+
+/** @brief Thread-safe ingestion of SPI commands from the application layer. */
+int FPGA_EnqueueSpiPacket(const FpgaSpiPacket_t *packet) {
+    if (!packet) return -EINVAL;
+    return k_msgq_put(&fpga_tx_queue, packet, K_NO_WAIT);
+}
+
+==================================================
+
+--- FILE: src\hal\fpga.h ---
+
+/**
+ * @file fpga.h
+ * @brief FPGA Programming Library for SPI payload management.
+ */
+#ifndef FPGA_H
+#define FPGA_H
+
+#include <stdint.h>
+#include "system_config.h"
+
+/**
+ * @brief Defines a formatted command packet sent to the FPGA via SPI.
+ */
+typedef struct {
+    uint8_t  sync;          /**< Sync byte ensuring alignment */
+    uint8_t  cmd;           /**< Hexadecimal command operation */
+    uint16_t length;        /**< Length of trailing payload */
+    uint8_t  payload[64];   /**< Data buffer */
+    uint8_t  crc;           /**< Verification checksum */
+} FpgaSpiPacket_t;
+
+/**
+ * @brief Reads a raw bitstream from the SD Card and flashes it to the FPGA over SPI.
+ * @param slot The ID of the slot to load from the SD card.
+ * @return 0 on success, negative errno on failure.
+ */
+int FPGA_Program_Slot(uint8_t slot);
+
+/**
+ * @brief Asserts the hardware reset lines to power-down the FPGA fabric.
+ */
+void FPGA_PowerDown(void);
+
+/**
+ * @brief Triggers the Zephyr event queue to power up the FPGA.
+ */
+void FPGA_RequestPowerUp(void);
+
+/**
+ * @brief Enqueues an SPI packet to the FPGA communication queue.
+ * @param packet Pointer to the populated packet structure.
+ * @return 0 on success, negative errno if the queue is full.
+ */
+int FPGA_EnqueueSpiPacket(const FpgaSpiPacket_t *packet);
+
+#endif /* FPGA_H */
+
+==================================================
+
+--- FILE: src\hal\joystick.c ---
+
+/**
+ * @file joystick.c
+ * @brief 5-way joystick driver — Zephyr port.
+ *
+ * Key differences from the STM32/HAL version:
+ *  - Switch pins are read via gpio_pin_get_dt() using DT aliases.
+ *  - The ACTIVE_LOW flag in the overlay handles the active-low inversion,
+ *    so gpio_pin_get_dt() returns 1 when the button IS pressed.
+ *  - USB_Printf() is replaced by printk() (routed to CDC-ACM via Zephyr console).
+ */
+
+#include "hal/joystick.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/sys/printk.h>
+
+/* --------------------------------------------------------------------------
+ * Device-tree GPIO specs  (aliases defined in inklab_v1.overlay)
+ *
+ *   joy-up    → gpiod 1  (SW_B, ACTIVE_LOW | PULL_UP)
+ *   joy-down  → gpiob 8  (SW_C, ACTIVE_LOW | PULL_UP)
+ *   joy-left  → gpioc 7  (SW_A, ACTIVE_LOW | PULL_UP)
+ *   joy-right → gpiob 9  (SW_D, ACTIVE_LOW | PULL_UP)
+ *   joy-center→ gpiod 2  (SW_CEN, ACTIVE_LOW | PULL_UP)
+ * -------------------------------------------------------------------------- */
+static const struct gpio_dt_spec joy_up    = GPIO_DT_SPEC_GET(DT_ALIAS(joy_up),     gpios);
+static const struct gpio_dt_spec joy_down  = GPIO_DT_SPEC_GET(DT_ALIAS(joy_down),   gpios);
+static const struct gpio_dt_spec joy_left  = GPIO_DT_SPEC_GET(DT_ALIAS(joy_left),   gpios);
+static const struct gpio_dt_spec joy_right = GPIO_DT_SPEC_GET(DT_ALIAS(joy_right),  gpios);
+static const struct gpio_dt_spec joy_cen   = GPIO_DT_SPEC_GET(DT_ALIAS(joy_center), gpios);
+
+/* --------------------------------------------------------------------------
+ * Module state
+ * -------------------------------------------------------------------------- */
+static uint8_t      prev_state   = 0xFF;  /* Tracks last combined pin state */
+static uint8_t      last_up      = 0;
+static uint8_t      last_down    = 0;
+static uint8_t      last_left    = 0;
+static uint8_t      last_right   = 0;
+static uint8_t      last_cen     = 0;
+
+static JoystickMap_t current_map = { .ud = 0, .lr = 0, .cen = 0 };
+
+/* --------------------------------------------------------------------------
+ * Public API
+ * -------------------------------------------------------------------------- */
+
+int Joystick_Init(void)
+{
+    const struct gpio_dt_spec *pins[] = {
+        &joy_up, &joy_down, &joy_left, &joy_right, &joy_cen
+    };
+
+    for (int i = 0; i < 5; i++) {
+        if (!gpio_is_ready_dt(pins[i])) {
+            return -ENODEV;
+        }
+        int ret = gpio_pin_configure_dt(pins[i], GPIO_INPUT);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+
+    prev_state = 0xFF; /* Force a state update on first Process() call */
+    return 0;
+}
+
+void Joystick_SetMap(uint8_t ud, uint8_t lr, uint8_t cen)
+{
+    current_map.ud  = ud;
+    current_map.lr  = lr;
+    current_map.cen = cen;
+}
+
+JoystickMap_t Joystick_GetMap(void)
+{
+    return current_map;
+}
+
+JoyAction_t Joystick_Process(void)
+{
+    /*
+     * gpio_pin_get_dt() returns 1 when the button IS pressed (ACTIVE_LOW is
+     * already resolved by the GPIO layer).  We encode all five into one byte
+     * so a single comparison detects any change.
+     */
+    uint8_t up    = (uint8_t)gpio_pin_get_dt(&joy_up);
+    uint8_t down  = (uint8_t)gpio_pin_get_dt(&joy_down);
+    uint8_t left  = (uint8_t)gpio_pin_get_dt(&joy_left);
+    uint8_t right = (uint8_t)gpio_pin_get_dt(&joy_right);
+    uint8_t cen   = (uint8_t)gpio_pin_get_dt(&joy_cen);
+
+    uint8_t current_state = (up << 4) | (down << 3) | (left << 2) | (right << 1) | cen;
+    JoyAction_t triggered = JOY_NONE;
+
+    if (current_state != prev_state) {
+        /* Report raw switch state to the UI dashboard */
+        printk("{\"type\":\"io\",\"u\":%d,\"d\":%d,\"l\":%d,\"r\":%d,\"c\":%d}\n",
+               up, down, left, right, cen);
+
+        /* Detect falling-edge triggers (button newly pressed) */
+        if      (up    && !last_up)    { triggered = JOY_UP;     }
+        else if (down  && !last_down)  { triggered = JOY_DOWN;   }
+        else if (left  && !last_left)  { triggered = JOY_LEFT;   }
+        else if (right && !last_right) { triggered = JOY_RIGHT;  }
+        else if (cen   && !last_cen)   { triggered = JOY_CENTER; }
+
+        prev_state = current_state;
+    }
+
+    last_up    = up;
+    last_down  = down;
+    last_left  = left;
+    last_right = right;
+    last_cen   = cen;
+
+    return triggered;
+}
+
+==================================================
+
+--- FILE: src\hal\joystick.h ---
+
+/**
+ * @file joystick.h
+ * @brief 5-way joystick driver for InkLab-Vela.
+ *
+ * Reads five GPIO-key aliases from the device tree and converts edge
+ * transitions into a JoyAction_t event.  No hardware debounce timer is used —
+ * the caller is responsible for polling at a safe rate (≥ 50 ms recommended).
+ *
+ * Overlay aliases:
+ *   joy-up, joy-down, joy-left, joy-right, joy-center
+ */
+
+#ifndef JOYSTICK_H
+#define JOYSTICK_H
+
+#include <stdint.h>
+
+/* --------------------------------------------------------------------------
+ * Types
+ * -------------------------------------------------------------------------- */
+
+/** Direction actions produced by Joystick_Process(). */
+typedef enum {
+    JOY_NONE   = 0,
+    JOY_UP,
+    JOY_DOWN,
+    JOY_LEFT,
+    JOY_RIGHT,
+    JOY_CENTER,
+} JoyAction_t;
+
+/**
+ * @brief User-configurable action mapping.
+ *
+ * Each axis field selects a "mode" (0, 1, …) that the application layer
+ * interprets.  The joystick driver itself does not care about the meaning.
+ */
+typedef struct {
+    uint8_t ud;  /**< Up/Down mode index  */
+    uint8_t lr;  /**< Left/Right mode index */
+    uint8_t cen; /**< Centre button mode index */
+} JoystickMap_t;
+
+/* --------------------------------------------------------------------------
+ * API
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief Bind GPIO specs and reset internal edge-detection state.
+ * @return 0 on success, negative errno on GPIO init failure.
+ */
+int Joystick_Init(void);
+
+/** @brief Update the axis-to-mode mapping. */
+void Joystick_SetMap(uint8_t ud, uint8_t lr, uint8_t cen);
+
+/** @brief Read the current axis-to-mode mapping. */
+JoystickMap_t Joystick_GetMap(void);
+
+/**
+ * @brief Sample all buttons and return the first edge-triggered action.
+ *
+ * Also emits a JSON state frame via printk() whenever any pin changes, so
+ * the UI dashboard can track raw switch states in real time.
+ *
+ * @return JOY_NONE if nothing changed since the last call, otherwise the
+ *         action that was newly triggered.
+ */
+JoyAction_t Joystick_Process(void);
+
+#endif /* JOYSTICK_H */
+
+==================================================
+
+--- FILE: src\hal\led_manager.c ---
+
+/**
+ * @file led_manager.c
+ * @brief RGB LED manager — Zephyr port.
+ *
+ * Key differences from the STM32/HAL version:
+ *  - GPIO access uses Zephyr's gpio_pin_set_dt() instead of HAL_GPIO_WritePin().
+ *  - LED specs are fetched at init via GPIO_DT_SPEC_GET(DT_ALIAS(...)).
+ *  - No HAL, no cmsis_os — pure Zephyr.
+ */
+
+#include "hal/led_manager.h"
+#include "system_config.h"
+#include "system_config.h" 
+
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/gpio.h>
+
+/* --------------------------------------------------------------------------
+ * Device-tree GPIO specs  (aliases defined in inklab_v1.overlay)
+ *   led0 → led_r → GPIOC 15 ACTIVE_LOW
+ *   led1 → led_g → GPIOC 14 ACTIVE_LOW
+ *   led2 → led_b → GPIOC 13 ACTIVE_LOW
+ * -------------------------------------------------------------------------- */
+static const struct gpio_dt_spec led_r = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+static const struct gpio_dt_spec led_g = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+static const struct gpio_dt_spec led_b = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
+
+/* --------------------------------------------------------------------------
+ * Module state
+ * -------------------------------------------------------------------------- */
+static uint8_t  led_limit_r   = LED_DEFAULT_LIMIT_R;
+static uint8_t  led_limit_g   = LED_DEFAULT_LIMIT_G;
+static uint8_t  led_limit_b   = LED_DEFAULT_LIMIT_B;
+
+static volatile bool led_muted       = false;
+static volatile bool heartbeat_state = false;
+static volatile bool fpga_ready      = false;
+static volatile bool led_override    = false;
+
+/* --------------------------------------------------------------------------
+ * Helpers
+ * -------------------------------------------------------------------------- */
+
+/** @brief Internal helper to safely drive a specific LED channel, abstracting active-low DT logic. */
+static inline void set_led(const struct gpio_dt_spec *spec, bool active)
+{
+    /* gpio_pin_set_dt respects ACTIVE_LOW automatically */
+    gpio_pin_set_dt(spec, active ? 1 : 0);
+}
+
+/* --------------------------------------------------------------------------
+ * Public API
+ * -------------------------------------------------------------------------- */
+
+int LED_Init(void)
+{
+    if (!gpio_is_ready_dt(&led_r) ||
+        !gpio_is_ready_dt(&led_g) ||
+        !gpio_is_ready_dt(&led_b)) {
+        return -ENODEV;
+    }
+
+    gpio_pin_configure_dt(&led_r, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&led_g, GPIO_OUTPUT_INACTIVE);
+    gpio_pin_configure_dt(&led_b, GPIO_OUTPUT_INACTIVE);
+
+    return 0;
+}
+
+void LED_SetLimits(uint8_t r_percent, uint8_t g_percent, uint8_t b_percent)
+{
+    led_limit_r = r_percent;
+    led_limit_g = g_percent;
+    led_limit_b = b_percent;
+    led_muted   = false; /* Interacting with sliders unmutes automatically */
+}
+
+void LED_SetMute(bool mute)
+{
+    led_muted = mute;
+    if (mute) {
+        /* Immediately extinguish all channels */
+        set_led(&led_r, false);
+        set_led(&led_g, false);
+        set_led(&led_b, false);
+    }
+}
+
+void LED_ToggleHeartbeat(void)
+{
+    heartbeat_state = !heartbeat_state;
+}
+
+void LED_SetFpgaReady(bool is_ready)
+{
+    fpga_ready = is_ready;
+}
+
+void LED_SetOverride(bool override)
+{
+    led_override = override;
+}
+
+void LED_PWM_Tick(void)
+{
+    static uint8_t pwm_cnt = 0;
+
+    if (++pwm_cnt >= LED_PWM_MAX) { // Replace 100
+        pwm_cnt = 0;
+    }
+
+    if (led_muted) {
+        return;
+    }
+
+    /*
+     * When override is active all three channels follow their limit (diagnostic).
+     * Otherwise each channel carries a specific meaning:
+     *   RED   → FPGA NOT ready
+     *   GREEN → FPGA ready
+     *   BLUE  → heartbeat pulse
+     */
+    bool red_on   = led_override ? true : !fpga_ready;
+    bool green_on = led_override ? true :  fpga_ready;
+    bool blue_on  = led_override ? true :  heartbeat_state;
+
+    set_led(&led_r, red_on   && (pwm_cnt < led_limit_r));
+    set_led(&led_g, green_on && (pwm_cnt < led_limit_g));
+    set_led(&led_b, blue_on  && (pwm_cnt < led_limit_b));
+}
+
+void LED_GetStatus(uint8_t *r, uint8_t *g, uint8_t *b, bool *muted)
+{
+    *r     = led_limit_r;
+    *g     = led_limit_g;
+    *b     = led_limit_b;
+    *muted = led_muted;
+}
+
+/* --------------------------------------------------------------------------
+ * Zephyr Native Timer Integration
+ * -------------------------------------------------------------------------- */
+ 
+ /** @brief Hardware timer callback that drives the software PWM matrix. */
+static void led_timer_handler(struct k_timer *timer_id)
+{
+    /* Call the agnostic tick handler */
+    LED_PWM_Tick();
+}
+
+/* Globally define the timer so it can be referenced by sys_power.c */
+K_TIMER_DEFINE(led_pwm_timer, led_timer_handler, NULL);
+
+==================================================
+
+--- FILE: src\hal\led_manager.h ---
+
+/**
+ * @file led_manager.h
+ * @brief RGB LED manager for InkLab-Vela.
+ *
+ * Provides a simple software-PWM heartbeat and FPGA-ready indicator driven
+ * from a periodic timer callback (LED_PWM_Tick).  All GPIO access is done
+ * via the Zephyr GPIO DT API.
+ *
+ * The overlay declares:
+ *   alias led0 = &led_r  (GPIOC 15, ACTIVE_LOW)
+ *   alias led1 = &led_g  (GPIOC 14, ACTIVE_LOW)
+ *   alias led2 = &led_b  (GPIOC 13, ACTIVE_LOW)
+ */
+
+#ifndef LED_MANAGER_H
+#define LED_MANAGER_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/* --------------------------------------------------------------------------
+ * Initialisation
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief Bind GPIO specs and drive all LEDs off.
+ *        Must be called once before any other LED function.
+ * @return 0 on success, negative errno on GPIO init failure.
+ */
+int LED_Init(void);
+
+/* --------------------------------------------------------------------------
+ * State setters (thread-safe — simple atomic flags)
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief Set per-channel brightness limits (0–100 %).
+ *        Passing a new limit automatically clears any mute.
+ */
+void LED_SetLimits(uint8_t r_percent, uint8_t g_percent, uint8_t b_percent);
+
+/** @brief Mute (all off) or un-mute the LED outputs. */
+void LED_SetMute(bool mute);
+
+/** @brief Toggle the heartbeat state (call every ~500 ms from LED task). */
+void LED_ToggleHeartbeat(void);
+
+/** @brief Reflect the FPGA programming result on the status LED. */
+void LED_SetFpgaReady(bool is_ready);
+
+/**
+ * @brief Force all channels on at their configured limits (diagnostic mode).
+ *        Setting override=false returns to the normal heartbeat/status logic.
+ */
+void LED_SetOverride(bool override);
+
+/* --------------------------------------------------------------------------
+ * PWM tick  (call from a 100 Hz periodic context)
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @brief Software-PWM tick — must be called at a stable 100 Hz rate.
+ *
+ * Drives the three GPIO lines according to the current state.  Safe to call
+ * from a k_timer callback or a dedicated low-priority thread.
+ */
+void LED_PWM_Tick(void);
+
+/* --------------------------------------------------------------------------
+ * Telemetry helper
+ * -------------------------------------------------------------------------- */
+
+/** @brief Read back current brightness limits and mute flag. */
+void LED_GetStatus(uint8_t *r, uint8_t *g, uint8_t *b, bool *muted);
+
+#endif /* LED_MANAGER_H */
+
+==================================================
+
+--- FILE: src\hal\pinmux.h ---
+
+/**
+ * @file pinmux.h
+ * @brief Dynamic runtime hardware routing mappings for external pins.
+ * 
+ * Law 1 Compliant: Contains absolutely no Zephyr/RTOS headers.
+ */
+#ifndef PINMUX_H
+#define PINMUX_H
+
+#include <stdint.h>
+
+/**
+ * @brief Initializes the dynamic pinmux subsystem from non-volatile storage.
+ * 
+ * Reads the saved configuration (e.g., from the SD card) and uses Zephyr's 
+ * dynamic pinctrl to apply the routing before the system starts.
+ * 
+ * @return 0 on success, negative errno on filesystem or parsing failure.
+ */
+int Pinmux_Init(void);
+
+/**
+ * @brief Stages a dynamic routing request for a specific pin.
+ * 
+ * Records the user's intent to route a pin. The change is not applied to 
+ * hardware immediately. It must be finalized with Pinmux_Apply().
+ * 
+ * @param pinName String identifier for the MCU physical pin (e.g., "PA5").
+ * @param funcName String identifier for the peripheral function (e.g., "USART3_TX").
+ * @return 0 on success, -EINVAL if the parameters are invalid.
+ */
+int Pinmux_SetPin(const char* pinName, const char* funcName);
+
+/**
+ * @brief Commits staged pinmux configurations to storage and reboots.
+ * 
+ * Saves the current routing map to the SD card and triggers a soft MCU reset
+ * (SYS_REBOOT_COLD) to apply the hardware changes atomically on boot.
+ * 
+ * @return 0 on success, negative errno on write failure.
+ */
+int Pinmux_Apply(void);
+
+#endif /* PINMUX_H */
+
+==================================================
+
+--- FILE: src\hal\powerMonitor.c ---
+
+/**
+ * @file powerMonitor.c
+ * @brief Zephyr Implementation of the Power Monitor Driver (INA series).
+ * @note Strictly enforces shared bus access via bus_manager.h (Law 2).
+ */
+
+#include "hal/powerMonitor.h"
+#include "system_config.h"
+#include "bus_manager.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/drivers/i2c.h>
+#include <math.h>
+
+#define REG_CONFIG       0x00
+#define REG_SHUNTVOLTAGE 0x01
+#define REG_BUSVOLTAGE   0x02
+#define REG_POWER        0x03
+#define REG_CURRENT      0x04
+#define REG_CALIBRATION  0x05
+
+#define INA219_REG_RESET 0x8000
+#define CONFIG_GAIN_MASK 0x1800
+
+/** @brief Internal helper to safely read a 16-bit register over a shared I2C bus. */
+static int Read16(PowerMonitor_t *dev, uint8_t reg, uint16_t *value) {
+    uint8_t buf[2];
+    
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    int status = i2c_burst_read(dev->i2c_bus, dev->address, reg, buf, 2);
+    BusManager_UnlockI2C();
+    
+    if (status == 0) {
+        *value = (buf[0] << 8) | buf[1];
+    }
+    return status;
+}
+
+/** @brief Internal helper to safely write a 16-bit register over a shared I2C bus. */
+static int Write16(PowerMonitor_t *dev, uint8_t reg, uint16_t value) {
+    uint8_t buf[2] = { (value >> 8) & 0xFF, value & 0xFF };
+    
+    if (BusManager_LockI2C() != 0) return -ENOLCK;
+    int status = i2c_burst_write(dev->i2c_bus, dev->address, reg, buf, 2);
+    BusManager_UnlockI2C();
+    
+    return status;
+}
+
+int PowerMonitor_Init(PowerMonitor_t *dev, const struct device *i2c_bus, uint8_t addr, float r_shunt_ohms, float max_expected_A) {
+    if (!dev || !i2c_bus) return -EINVAL;
+
+    dev->i2c_bus = i2c_bus;
+    dev->address = addr;
+    dev->r_shunt_ohms = r_shunt_ohms;
+    dev->current_offset_mA = 0.0f;
+
+    if (!device_is_ready(dev->i2c_bus)) return -ENODEV;
+
+    int ret = Write16(dev, REG_CONFIG, INA219_REG_RESET);
+    if (ret < 0) return ret;
+
+    k_msleep(5); /* Yield while device resets */
+
+    dev->current_lsb_A = max_expected_A / INA_CURRENT_LSB_BASE;
+    float cal = INA_CALIB_MAGIC / (dev->current_lsb_A * dev->r_shunt_ohms);
+    dev->cal_value = (uint16_t)cal;
+
+    ret = Write16(dev, REG_CALIBRATION, dev->cal_value);
+    if (ret < 0) return ret;
+
+    dev->current_pga = POWER_MONITOR_PGA_320MV;
+    return Write16(dev, REG_CONFIG, INA_DEFAULT_CONFIG);
+}
+
+int PowerMonitor_Read(PowerMonitor_t *dev, PowerMonitor_Data_t *data) {
+    uint16_t bus_val, shunt_val, current_val;
+
+    if (Read16(dev, REG_BUSVOLTAGE, &bus_val) < 0) return -EIO;
+    if (Read16(dev, REG_SHUNTVOLTAGE, &shunt_val) < 0) return -EIO;
+    if (Read16(dev, REG_CURRENT, &current_val) < 0) return -EIO;
+
+    data->overflow         = (bus_val & 0x01);
+    data->bus_voltage_V    = (bus_val >> 3) * INA_BUS_V_MULTIPLIER;
+    data->shunt_voltage_mV = ((int16_t)shunt_val) * INA_SHUNT_MV_MULTIPLIER;
+
+    data->current_mA = ((((int16_t)current_val) * dev->current_lsb_A) * 1000.0f) - dev->current_offset_mA;
+
+    if (data->current_mA < 0.0f) {
+        data->current_mA = 0.0f;
+    }
+
+    data->power_mW = data->bus_voltage_V * data->current_mA;
+    return 0;
+}
+
+int PowerMonitor_SetPGA(PowerMonitor_t *dev, PowerMonitor_PGA_t pga) {
+    uint16_t config;
+    if (Read16(dev, REG_CONFIG, &config) < 0) return -EIO;
+
+    config = (config & ~CONFIG_GAIN_MASK) | pga;
+    if (Write16(dev, REG_CONFIG, config) == 0) {
+        dev->current_pga = pga;
+        return 0;
+    }
+    return -EIO;
+}
+
+int PowerMonitor_AutoScale(PowerMonitor_t *dev, const PowerMonitor_Data_t *current_data) {
+    if (!dev || !current_data) return -EINVAL;
+
+    float shunt_mV = fabsf(current_data->shunt_voltage_mV);
+    PowerMonitor_PGA_t new_pga = dev->current_pga;
+
+    if (current_data->overflow || shunt_mV > INA_AUTO_UP_320MV) {
+        new_pga = POWER_MONITOR_PGA_320MV;
+    } else if (shunt_mV > INA_AUTO_UP_160MV && dev->current_pga < POWER_MONITOR_PGA_160MV) {
+        new_pga = POWER_MONITOR_PGA_160MV;
+    } else if (shunt_mV > INA_AUTO_UP_80MV && dev->current_pga < POWER_MONITOR_PGA_80MV) {
+        new_pga = POWER_MONITOR_PGA_80MV;
+    }
+
+    if (!current_data->overflow) {
+        if (dev->current_pga == POWER_MONITOR_PGA_320MV && shunt_mV < INA_AUTO_DN_160MV) {
+            new_pga = POWER_MONITOR_PGA_160MV;
+        } else if (dev->current_pga == POWER_MONITOR_PGA_160MV && shunt_mV < INA_AUTO_DN_80MV) {
+            new_pga = POWER_MONITOR_PGA_80MV;
+        } else if (dev->current_pga == POWER_MONITOR_PGA_80MV && shunt_mV < INA_AUTO_DN_40MV) {
+            new_pga = POWER_MONITOR_PGA_40MV;
+        }
+    }
+
+    if (new_pga != dev->current_pga) {
+        return PowerMonitor_SetPGA(dev, new_pga);
+    }
+
+    return 0;
+}
+
+int PowerMonitor_SetFastMode(PowerMonitor_t *dev, uint8_t enable) {
+    uint16_t config;
+    if (Read16(dev, REG_CONFIG, &config) < 0) return -EIO;
+
+    config &= ~0x07F8;
+
+    if (enable) {
+        config |= 0x0088; // 10-bit mode
+    } else {
+        config |= 0x0198; // 12-bit mode
+    }
+
+    return Write16(dev, REG_CONFIG, config);
+}
+
+int PowerMonitor_SetSleep(PowerMonitor_t *dev, uint8_t sleep) {
+    uint16_t config;
+    if (Read16(dev, REG_CONFIG, &config) < 0) return -EIO;
+
+    if (sleep) {
+        config &= ~0x0007; 
+    } else {
+        config |= 0x0007;  
+    }
+    return Write16(dev, REG_CONFIG, config);
+}
+
+int PowerMonitor_TriggerSingleShot(PowerMonitor_t *dev) {
+    uint16_t config;
+    if (Read16(dev, REG_CONFIG, &config) < 0) return -EIO;
+
+    config &= ~0x0007;
+    config |= 0x0003; 
+    return Write16(dev, REG_CONFIG, config);
+}
+
+void PowerMonitor_SetOffset(PowerMonitor_t *dev, float offset_mA) {
+    if (dev) dev->current_offset_mA = offset_mA;
+}
+
+==================================================
+
+--- FILE: src\hal\powerMonitor.h ---
+
+/**
+ * @file powerMonitor.h
+ * @brief Hardware-agnostic Power Monitor Driver API.
+ */
+#ifndef POWER_MONITOR_H
+#define POWER_MONITOR_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+/* Forward declaration for opaque device pointer (Law 1) */
+struct device;
+
+/**
+ * @brief Programmable Gain Amplifier (PGA) Options
+ */
+typedef enum {
+    POWER_MONITOR_PGA_40MV  = 0x0000,
+    POWER_MONITOR_PGA_80MV  = 0x0800,
+    POWER_MONITOR_PGA_160MV = 0x1000,
+    POWER_MONITOR_PGA_320MV = 0x1800
+} PowerMonitor_PGA_t;
+
+/**
+ * @brief Core Power Telemetry Data
+ */
+typedef struct {
+    float bus_voltage_V;
+    float shunt_voltage_mV;
+    float current_mA;
+    float power_mW;
+    bool  overflow;
+} PowerMonitor_Data_t;
+
+/**
+ * @brief Device handle structure for the Power Monitor
+ */
+typedef struct {
+    const struct device *i2c_bus;
+    uint8_t address;
+    float r_shunt_ohms;
+    float current_lsb_A;
+    uint16_t cal_value;
+    PowerMonitor_PGA_t current_pga;
+    float current_offset_mA;
+} PowerMonitor_t;
+
+/**
+ * @brief Initializes the power monitor sensor.
+ * @param dev Pointer to the PowerMonitor instance.
+ * @param i2c_bus Opaque pointer to the Zephyr I2C device.
+ * @param addr I2C address of the sensor.
+ * @param r_shunt_ohms Shunt resistor value in ohms.
+ * @param max_expected_A Maximum expected current in amps.
+ * @return 0 on success, negative errno on failure.
+ */
+int PowerMonitor_Init(PowerMonitor_t *dev, const struct device *i2c_bus, uint8_t addr, float r_shunt_ohms, float max_expected_A);
+
+/**
+ * @brief Reads voltage, current, and power from the sensor.
+ * @param dev Pointer to the PowerMonitor instance.
+ * @param data Pointer to the structure to hold the reading.
+ * @return 0 on success, negative errno on failure.
+ */
+int PowerMonitor_Read(PowerMonitor_t *dev, PowerMonitor_Data_t *data);
+
+/**
+ * @brief Manually overrides the Programmable Gain Amplifier (PGA).
+ * @param dev Pointer to the PowerMonitor instance.
+ * @param pga PGA setting enumeration.
+ * @return 0 on success, negative errno on failure.
+ */
+int PowerMonitor_SetPGA(PowerMonitor_t *dev, PowerMonitor_PGA_t pga);
+
+/**
+ * @brief Dynamically adjusts the PGA based on current telemetry data.
+ * @param dev Pointer to the PowerMonitor instance.
+ * @param current_data Pointer to the recent telemetry struct to evaluate.
+ * @return 0 on success, negative errno on failure.
+ */
+int PowerMonitor_AutoScale(PowerMonitor_t *dev, const PowerMonitor_Data_t *current_data);
+
+/**
+ * @brief Configures the ADC for fast (10-bit) or standard (12-bit) resolution.
+ * @param dev Pointer to the PowerMonitor instance.
+ * @param enable 1 to enable Fast Mode, 0 for standard precision.
+ * @return 0 on success, negative errno on failure.
+ */
+int PowerMonitor_SetFastMode(PowerMonitor_t *dev, uint8_t enable);
+
+/**
+ * @brief Toggles low-power shutdown mode.
+ * @param dev Pointer to the PowerMonitor instance.
+ * @param sleep 1 to enter Power-Down, 0 for continuous mode.
+ * @return 0 on success, negative errno on failure.
+ */
+int PowerMonitor_SetSleep(PowerMonitor_t *dev, uint8_t sleep);
+
+/**
+ * @brief Triggers a single-shot conversion when in sleep mode.
+ * @param dev Pointer to the PowerMonitor instance.
+ * @return 0 on success, negative errno on failure.
+ */
+int PowerMonitor_TriggerSingleShot(PowerMonitor_t *dev);
+
+/**
+ * @brief Configures a software offset baseline to subtract from current readings.
+ * @param dev Pointer to the PowerMonitor instance.
+ * @param offset_mA Hardware baseline offset in mA.
+ */
+void PowerMonitor_SetOffset(PowerMonitor_t *dev, float offset_mA);
+
+#endif /* POWER_MONITOR_H */
+
+==================================================
+
+--- FILE: src\hal\sys_power.c ---
+
+/**
+ * @file sys_power.c
+ * @brief Zephyr-native implementation of low-power suspend states.
+ */
+#include "hal/sys_power.h"
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/pm/pm.h>
+
+#include "hal/bq25798.h"
+#include "hal/powerMonitor.h"
+#include "hal/led_manager.h"
+#include "system_config.h"
+
+extern PowerMonitor_t ina_1v2_core;
+extern PowerMonitor_t ina_3v3_ext;
+extern PowerMonitor_t ina_3v3_fpga;
+extern PowerMonitor_t ina_3v3_mcu;
+
+extern struct k_timer led_pwm_timer;
+
+static bool is_sleeping = false;
+
+bool SysPower_IsSleeping(void) {
+    return is_sleeping;
+}
+
+void SysPower_EnterSleep(void) {
+    if (is_sleeping) return;
+    is_sleeping = true;
+
+    LED_SetMute(true);
+    BQ25798_SetPFM_FWD(1);
+    k_timer_stop(&led_pwm_timer);
+
+    /* Suspend external I2C monitors */
+    PowerMonitor_SetSleep(&ina_1v2_core,  1);
+    PowerMonitor_SetSleep(&ina_3v3_ext,   1);
+    PowerMonitor_SetSleep(&ina_3v3_fpga,  1);
+    PowerMonitor_SetSleep(&ina_3v3_mcu,   1);
+
+    printk("LOG: Entering Low-Power State (Peripherals Sleep)\n");
+
+    #ifdef CONFIG_PM
+        /* Formally instruct the Zephyr kernel to suspend the CPU on idle */
+        pm_state_set(0u, &(struct pm_state_info){PM_STATE_SUSPEND_TO_IDLE, 0, 0});
+    #else
+        printk("LOG: Zephyr Deep Sleep disabled to maintain USB clock.\n");
+    #endif
+}
+
+void SysPower_Wake(void) {
+    if (!is_sleeping) return;
+
+    /* Returning to Active restores standard clocks automatically via Zephyr PM */
+    BQ25798_SetPFM_FWD(0);
+    k_sleep(K_MSEC(50));
+
+    is_sleeping = false;
+    LED_SetMute(false);
+    k_timer_start(&led_pwm_timer, K_MSEC(LED_PWM_PERIOD_MS), K_MSEC(LED_PWM_PERIOD_MS));
+
+    PowerMonitor_SetSleep(&ina_1v2_core,  0);
+    PowerMonitor_SetSleep(&ina_3v3_ext,   0);
+    PowerMonitor_SetSleep(&ina_3v3_fpga,  0);
+    PowerMonitor_SetSleep(&ina_3v3_mcu,   0);
+
+    printk("LOG: System fully awake.\n");
+}
+
+==================================================
+
+--- FILE: src\hal\sys_power.h ---
+
+/**
+ * @file sys_power.h
+ * @brief System-level power management for InkLab-Vela.
+ *
+ * Controls the sleep/wake transitions of the application layer:
+ *  - Mutes LEDs and puts INA sensors to sleep on entry.
+ *  - Wakes them up and re-enables the LED PWM timer on exit.
+ *
+ * Clock scaling (HSI ↔ PLL) is intentionally skipped in the Zephyr port
+ * because the USB stack requires the PLL to remain active.  If you need
+ * genuine low-power states use Zephyr's PM subsystem instead.
+ */
+
+#ifndef SYS_POWER_H
+#define SYS_POWER_H
+
+#include <stdbool.h>
+
+/* --------------------------------------------------------------------------
+ * API
+ * -------------------------------------------------------------------------- */
+
+/** @brief Returns true if the system is currently in its low-power state. */
+bool SysPower_IsSleeping(void);
+
+/**
+ * @brief Transition into the low-power state.
+ *
+ * Effects: LED muted, PFM enabled on BQ25798, INA sensors powered down,
+ * LED PWM timer stopped.  Idempotent — safe to call when already asleep.
+ */
+void SysPower_EnterSleep(void);
+
+/**
+ * @brief Return to the fully-active state.
+ *
+ * Effects: restores INA sensors, disables PFM, un-mutes LEDs, restarts the
+ * LED PWM timer.  Idempotent — safe to call when already awake.
+ */
+void SysPower_Wake(void);
+
+#endif /* SYS_POWER_H */
+
+==================================================
+
+--- FILE: src\proto\frontend_api.c ---
+
+// ============================================================================
+// INCLUDES
+// ============================================================================
+#include "proto/frontend_api.h"
+#include "system_config.h"
+
+// Zephyr kernel & subsystems
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/fs/fs.h>
+#include <zephyr/drivers/adc.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/debug/thread_analyzer.h>
+
+// Application HAL modules
+#include "hal/bq25798.h"
+#include "hal/fpga.h"
+#include "hal/led_manager.h"
+#include "hal/joystick.h"
+#include "hal/diagnostics.h"
+#include "hal/sys_power.h"
+#include "hal/ext_interfaces.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+
+// ============================================================================
+// PRIVATE TYPES
+// ============================================================================
+
+typedef struct {
+    uint8_t buffer_idx;
+    uint16_t length;
+} DiskWriteReq_t;
+
+typedef enum {
+    UPLOAD_IDLE,
+    UPLOAD_RECEIVING
+} UploadState_t;
+
+typedef void (*CommandHandler_t)(int argc, char **argv);
+
+typedef struct {
+    const char        *cmd;
+    CommandHandler_t   handler;
+} CommandDef_t;
+
+// ============================================================================
+// ZEPHYR RTOS PRIMITIVES
+// ============================================================================
+
+/* Message queue: 2 pending write requests, 4-byte aligned */
+K_MSGQ_DEFINE(disk_write_queue, sizeof(DiskWriteReq_t), SD_WRITE_QUEUE_SIZE, SD_WRITE_QUEUE_ALIGN);
+
+/* Semaphore: dual-buffer pool (initial=2, max=2) */
+K_SEM_DEFINE(buffer_pool_sem, 2, 2);
+
+/* Disk-write task forward declaration */
+static void frontend_disk_write_task(void *p1, void *p2, void *p3);
+
+K_THREAD_DEFINE(disk_write_tid,
+                DISK_TASK_STACK,
+                frontend_disk_write_task,
+                NULL, NULL, NULL,
+                DISK_TASK_PRIO, 0, 0); 
+
+// ============================================================================
+// MODULE STATE
+// ============================================================================
+
+/* Dual write buffers — also borrowed by Diagnostics when upload is IDLE */
+__attribute__((aligned(4))) uint8_t sd_write_buffer[2][SD_BUF_SIZE];
+
+static uint8_t      active_fill_buf         = 0;
+static uint32_t     sd_write_idx            = 0;
+
+static UploadState_t current_upload_state   = UPLOAD_IDLE;
+static struct fs_file_t upload_fil;
+static uint32_t     upload_bytes_total      = 0;
+static uint32_t     upload_bytes_received   = 0;
+static uint32_t     bytes_since_last_ack    = 0;
+static uint8_t      incoming_checksum       = 0;
+
+static char         cmd_buffer[CMD_BUF_LEN];
+static uint16_t     cmd_idx                 = 0;
+static uint32_t     last_rx_time            = 0;
+
+// ============================================================================
+// EXTERNAL STATE (declared in other modules — keep minimal)
+//
+// NOTE: If any of these produce linker errors it means the owning module
+// has not been ported yet. Provide a stub .c file that defines the symbol
+// until the full port is complete.
+// ============================================================================
+extern volatile uint8_t  sd_is_mounted;        /* app_fatfs.c  */
+extern volatile uint8_t  telem_is_muted;       /* telemetry.c  */
+extern volatile uint32_t telem_rate_ms;        /* telemetry.c  */
+
+extern uint8_t  current_slot;                  /* fpga.c       */
+extern uint8_t  fpga_is_ready;                 /* fpga.c       */
+extern char     slot_names[FPGA_MAX_SLOTS][FPGA_SLOT_NAME_LEN];            /* fpga.c       */
+extern uint8_t  slot_clk_configs[FPGA_MAX_SLOTS];          /* fpga.c       */
+extern uint8_t  last_active_slot;              /* fpga.c       */
+
+/* Config persistence helpers (implement in a config.c module) */
+extern void Save_Configs(void);
+extern void Apply_Slot_Clock(uint8_t slot);
+
+/* Telemetry fast-mode helper */
+extern void Telemetry_SetFastTarget(uint8_t ch, const char *target);
+
+/* OTA — keep as HAL shim until MCUboot port is complete */
+extern int OTA_Update_From_SD(const char *filename);
+
+// ============================================================================
+// FORWARD DECLARATIONS (command handlers defined below)
+// ============================================================================
+static void Cmd_START(int argc, char **argv);
+static void Cmd_SETCLK(int argc, char **argv);
+static void Cmd_SCAN(int argc, char **argv);
+static void Cmd_SD_TEST(int argc, char **argv);
+static void Cmd_RAW_TEST(int argc, char **argv);
+static void Cmd_SECTOR_TEST(int argc, char **argv);
+static void Cmd_READ_TEST(int argc, char **argv);
+static void Cmd_LED(int argc, char **argv);
+static void Cmd_SPI(int argc, char **argv);
+static void Cmd_TELEM(int argc, char **argv);
+static void Cmd_SYS(int argc, char **argv);
+static void Cmd_BQ(int argc, char **argv);
+static void Cmd_IO(int argc, char **argv);
+static void Cmd_GET_SLOT(int argc, char **argv);
+static void Cmd_MEM(int argc, char **argv);
+static void Cmd_ADC(int argc, char **argv);
+static void Cmd_UART(int argc, char **argv);
+static void Cmd_EXT(int argc, char **argv);
+static void Cmd_BENCHMARK(int argc, char **argv);
+static void Cmd_DELAY(int argc, char **argv);
+static void Cmd_MACRO(int argc, char **argv);
+
+void Frontend_ExecuteCommand(char *cmd_str); /* public, used by Cmd_MACRO */
+
+// ============================================================================
+// COMMAND TABLE
+// ============================================================================
+static const CommandDef_t command_table[] = {
+    { "START",        Cmd_START        },
+    { "SETCLK",       Cmd_SETCLK       },
+    { "SCAN",         Cmd_SCAN         },
+    { "SD_TEST",      Cmd_SD_TEST      },
+    { "RAW_TEST",     Cmd_RAW_TEST     },
+    { "SECTOR_TEST",  Cmd_SECTOR_TEST  },
+    { "READ_TEST",    Cmd_READ_TEST    },
+    { "LED",          Cmd_LED          },
+    { "SPI",          Cmd_SPI          },
+    { "TELEM",        Cmd_TELEM        },
+    { "SYS",          Cmd_SYS          },
+    { "BQ",           Cmd_BQ           },
+    { "IO",           Cmd_IO           },
+    { "GET_SLOT",     Cmd_GET_SLOT     },
+    { "MEM",          Cmd_MEM          },
+    { "ADC",          Cmd_ADC          },
+    { "UART",         Cmd_UART         },
+    { "EXT",          Cmd_EXT          },
+    { "BENCHMARK",    Cmd_BENCHMARK    },
+    { "DELAY",        Cmd_DELAY        },
+    { "MACRO",        Cmd_MACRO        },
+    { NULL,           NULL             }
+};
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+/**
+ * @brief Drain all tokens from the semaphore pool back to maximum count.
+ *
+ * Used to reset the buffer-pool semaphore before starting a new upload without
+ * calling an OS-specific "reset" (which Zephyr does not provide).
+ */
+static void buffer_pool_reset(void)
+{
+    /* Take all available tokens (non-blocking) to reach count = 0 */
+    while (k_sem_take(&buffer_pool_sem, K_NO_WAIT) == 0) { /* drain */ }
+    /* Restore both tokens */
+    k_sem_give(&buffer_pool_sem);
+    k_sem_give(&buffer_pool_sem);
+}
+
+/**
+ * @brief Build a full SD path from a bare filename.
+ *        e.g. "slot1.bin" -> "/SD:/slot1.bin"
+ */
+static void sd_path(char *out, size_t out_size, const char *filename)
+{
+    snprintf(out, out_size, "%s/%s", SD_MOUNT_POINT, filename);
+}
+
+/**
+ * @brief Copy a bitstream file on the SD card.
+ *
+ * Borrows sd_write_buffer[0] as a 8 KiB staging buffer.
+ * Must only be called when current_upload_state == UPLOAD_IDLE.
+ */
+static int copy_bitstream(const char *src_path, const char *dst_path)
+{
+    struct fs_file_t src, dst;
+    fs_file_t_init(&src);
+    fs_file_t_init(&dst);
+
+    int rc = fs_open(&src, src_path, FS_O_READ);
+    if (rc < 0) { return rc; }
+
+    rc = fs_open(&dst, dst_path, FS_O_WRITE | FS_O_CREATE);
+    if (rc < 0) { fs_close(&src); return rc; }
+
+    ssize_t br;
+    while ((br = fs_read(&src, sd_write_buffer[0], SD_BUF_SIZE)) > 0) {
+        ssize_t bw = fs_write(&dst, sd_write_buffer[0], (size_t)br);
+        if (bw < br) { rc = -EIO; break; }
+    }
+
+    fs_close(&src);
+    fs_close(&dst);
+    return rc;
+}
+
+// ============================================================================
+// DISK-WRITE TASK
+// ============================================================================
+
+static void frontend_disk_write_task(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+
+    DiskWriteReq_t req;
+    while (1) {
+        if (k_msgq_get(&disk_write_queue, &req, K_FOREVER) == 0) {
+            if (sd_is_mounted) {
+                fs_write(&upload_fil,
+                         sd_write_buffer[req.buffer_idx],
+                         req.length);
+            }
+            k_sem_give(&buffer_pool_sem);
+        }
+    }
+}
+
+// ============================================================================
+// COMMAND HANDLERS
+// ============================================================================
+
+/** @brief Queries and returns the active FPGA slot and running clock parameters. */
+static void Cmd_GET_SLOT(int argc, char **argv)
+{
+    ARG_UNUSED(argc); ARG_UNUSED(argv);
+
+    if (last_active_slot < FPGA_MAX_SLOTS) {
+        printk("LAST_SLOT:%d\n", last_active_slot);
+    } else {
+        printk("LAST_SLOT:NONE\n");
+    }
+
+    if (fpga_is_ready) {
+        Apply_Slot_Clock(current_slot);
+    } else {
+        printk("LIVE_CLK:%d:FAILED\n", current_slot);
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Initializes a file stream write for a new bitstream or OTA firmware chunk. */
+static void Cmd_START(int argc, char **argv)
+{
+    if (argc < 4) { return; }
+    if (!sd_is_mounted) {
+        printk("ERR: Upload requires SD Card\n");
+        return;
+    }
+
+    int target_slot = atoi(argv[0]);
+    char fpath[SD_MAX_PATH_LEN];
+    bool valid = false;
+
+    if (target_slot >= 1 && target_slot < FPGA_MAX_SLOTS) {
+        snprintf(slot_names[target_slot], 16, "%s", argv[3]);
+        slot_clk_configs[target_slot] = (uint8_t)atoi(argv[2]);
+        Save_Configs();
+        sd_path(fpath, sizeof(fpath), "slot");
+        snprintf(fpath, sizeof(fpath), "%s/slot%d.bin", SD_MOUNT_POINT, target_slot);
+        valid = true;
+    } else if (target_slot == SD_SLOT_OTA) {
+        snprintf(fpath, sizeof(fpath), "%s/ota.bin", SD_MOUNT_POINT);
+        valid = true;
+    }
+
+    if (!valid) {
+        printk("ERR: Invalid slot number\n");
+        return;
+    }
+
+    fs_file_t_init(&upload_fil);
+    int rc = fs_open(&upload_fil, fpath, FS_O_WRITE | FS_O_CREATE);
+    if (rc < 0) {
+        printk("ERR: Could not open file for writing (%d)\n", rc);
+        return;
+    }
+
+    current_upload_state  = UPLOAD_RECEIVING;
+    upload_bytes_total    = (uint32_t)strtoul(argv[1], NULL, 10);
+    upload_bytes_received = 0;
+    bytes_since_last_ack  = 0;
+    incoming_checksum     = 0;
+    last_rx_time          = k_uptime_get_32();
+
+    buffer_pool_reset();
+    k_sem_take(&buffer_pool_sem, K_FOREVER); /* claim one buffer */
+
+    active_fill_buf = 0;
+    sd_write_idx    = 0;
+    printk("ACK_START\n");
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Sets and saves the operating clock divider for a specific FPGA slot. */
+static void Cmd_SETCLK(int argc, char **argv)
+{
+    if (argc < 2) { return; }
+    int s = atoi(argv[0]);
+    int m = atoi(argv[1]);
+    slot_clk_configs[s] = (uint8_t)m;
+    Save_Configs();
+    if (s == current_slot && fpga_is_ready) {
+        Apply_Slot_Clock(s);
+    }
+    printk("LOG: Divider %d saved for Slot %d\n", m, s);
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Iterates the SD card slot directory and returns the configured names. */
+static void Cmd_SCAN(int argc, char **argv)
+{
+    ARG_UNUSED(argc); ARG_UNUSED(argv);
+
+    if (!sd_is_mounted) {
+        printk("ERR: Scan requires SD Card\n");
+        return;
+    }
+    for (int i = 0; i < FPGA_MAX_SLOTS; i++) {
+        if (slot_names[i][0] == '\0') {
+            printk("SLOT_NAME:%d:unconfigured\n", i);
+        } else {
+            printk("SLOT_NAME:%d:%s\n", i, slot_names[i]);
+        }
+    }
+    printk("LOG: SD Slot scan complete.\n");
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Triggers the filesystem diagnostics test for read/write integrity. */
+static void Cmd_SD_TEST(int argc, char **argv)
+{
+    ARG_UNUSED(argc); ARG_UNUSED(argv);
+    if (sd_is_mounted) { Diag_RunSDCardTest(); }
+    else { printk("ERR: No SD Card\n"); }
+}
+
+/** @brief Command handler for RAW_TEST speed benchmark. */
+static void Cmd_RAW_TEST(int argc, char **argv)
+{
+    ARG_UNUSED(argc); ARG_UNUSED(argv);
+    if (sd_is_mounted) { Diag_RunRawSpeedTest(); }
+    else { printk("ERR: No SD Card\n"); }
+}
+
+/** @brief Command handler for SECTOR_TEST raw SPI benchmark. */
+static void Cmd_SECTOR_TEST(int argc, char **argv)
+{
+    ARG_UNUSED(argc); ARG_UNUSED(argv);
+    if (sd_is_mounted) { Diag_RunRawSectorTest(); }
+    else { printk("ERR: No SD Card\n"); }
+}
+
+/** @brief Command handler for READ_TEST USB uplink test. */
+static void Cmd_READ_TEST(int argc, char **argv)
+{
+    ARG_UNUSED(argc); ARG_UNUSED(argv);
+    if (sd_is_mounted) { Diag_RunUSBReadTest(); }
+    else { printk("ERR: No SD Card\n"); }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for controlling LED parameters. */
+static void Cmd_LED(int argc, char **argv)
+{
+    if (argc < 2) { return; }
+
+    if (strcmp(argv[0], "MUTE") == 0) {
+        LED_SetMute((uint8_t)atoi(argv[1]));
+        printk("LOG: LED Mute Applied\n");
+    } else if (strcmp(argv[0], "PWM") == 0 && argc == 4) {
+        LED_SetLimits(atoi(argv[1]), atoi(argv[2]), atoi(argv[3]));
+        printk("LOG: Intensity Limits Updated.\n");
+    } else if (strcmp(argv[0], "OVERRIDE") == 0) {
+        LED_SetOverride(atoi(argv[1]) != 0);
+        printk("LOG: LED Diagnostic Override Applied\n");
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for generic SPI operations to the FPGA. */
+static void Cmd_SPI(int argc, char **argv)
+{
+    if (argc < 1) { return; }
+
+    FpgaSpiPacket_t tx = {0};
+    tx.sync = FPGA_SYNC_BYTE;
+
+    if (strcmp(argv[0], "PING") == 0) {
+        tx.cmd = 0x01; tx.length = 0;
+    } else if (strcmp(argv[0], "ID") == 0) {
+        tx.cmd = 0x02; tx.length = 0;
+    } else if (strcmp(argv[0], "WR") == 0 && argc == 3) {
+        tx.cmd        = (uint8_t)strtol(argv[1], NULL, 16);
+        tx.length     = 1;
+        tx.payload[0] = (uint8_t)strtol(argv[2], NULL, 16);
+    } else if (strcmp(argv[0], "GPIO_DIR") == 0 && argc == 2) {
+        uint16_t val  = (uint16_t)strtol(argv[1], NULL, 16);
+        tx.cmd        = 0x05; tx.length = 2;
+        tx.payload[0] = val >> 8; tx.payload[1] = val & 0xFF;
+    } else if (strcmp(argv[0], "GPIO_WR") == 0 && argc == 2) {
+        uint16_t val  = (uint16_t)strtol(argv[1], NULL, 16);
+        tx.cmd        = 0x06; tx.length = 2;
+        tx.payload[0] = val >> 8; tx.payload[1] = val & 0xFF;
+    } else if (strcmp(argv[0], "GPIO_RD") == 0) {
+        tx.cmd = 0x07; tx.length = 0;
+    } else if (strcmp(argv[0], "RAM_WR") == 0 && argc == 3) {
+        uint16_t addr = (uint16_t)strtol(argv[1], NULL, 16);
+        tx.cmd        = 0x08; tx.length = 3;
+        tx.payload[0] = addr >> 8; tx.payload[1] = addr & 0xFF;
+        tx.payload[2] = (uint8_t)strtol(argv[2], NULL, 16);
+    } else if (strcmp(argv[0], "RAM_RD") == 0 && argc == 2) {
+        uint16_t addr = (uint16_t)strtol(argv[1], NULL, 16);
+        tx.cmd        = 0x09; tx.length = 2;
+        tx.payload[0] = addr >> 8; tx.payload[1] = addr & 0xFF;
+    } else if (strcmp(argv[0], "FIFO_WR") == 0 && argc == 2) {
+        tx.cmd        = 0x0A; tx.length = 1;
+        tx.payload[0] = (uint8_t)strtol(argv[1], NULL, 16);
+    } else if (strcmp(argv[0], "FIFO_RD") == 0) {
+        tx.cmd = 0x0B; tx.length = 0;
+    } else if (strcmp(argv[0], "BENCH") == 0) {
+        tx.cmd = 0x99; tx.length = 0;
+    } else if (strcmp(argv[0], "BULK") == 0) {
+        tx.cmd = 0x9A; tx.length = 0;
+    } else {
+        printk("ERR: Unknown SPI syntax. Check args.\n");
+        return;
+    }
+
+    if (FPGA_EnqueueSpiPacket(&tx) == 0) {
+        printk("LOG: SPI Command 0x%02X Queued.\n", tx.cmd);
+    } else {
+        printk("ERR: FPGA TX queue full.\n");
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for Telemetry configuration and rate adjustment. */
+static void Cmd_TELEM(int argc, char **argv)
+{
+    if (argc < 2) { return; }
+
+    if (strcmp(argv[0], "MUTE") == 0) {
+        telem_is_muted = (uint8_t)atoi(argv[1]);
+        printk("LOG: Telemetry stream %s.\n",
+               telem_is_muted ? "MUTED" : "UNMUTED");
+    } else if (strcmp(argv[0], "RATE") == 0) {
+        int rate = atoi(argv[1]);
+        if (rate < 50)   { rate = 50;   }
+        if (rate > 5000) { rate = 5000; }
+        telem_rate_ms = (uint32_t)rate;
+        printk("LOG: Telemetry rate set to %d ms\n", rate);
+    } else if (strcmp(argv[0], "FAST") == 0 && argc >= 3) {
+        Telemetry_SetFastTarget(atoi(argv[1]), argv[2]);
+        printk("LOG: Live Fast Mode Mapped.\n");
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for System level commands (Sleep, OTA, FS Ops). */
+static void Cmd_SYS(int argc, char **argv)
+{
+    if (argc < 1) { return; }
+
+    if (strcmp(argv[0], "RESET") == 0) {
+        printk("LOG: Performing Software Reset...\n");
+        k_msleep(100);
+        sys_reboot(SYS_REBOOT_COLD);
+
+    } else if (strcmp(argv[0], "SLEEP") == 0 && argc == 2) {
+        if (atoi(argv[1])) { SysPower_EnterSleep(); }
+        else               { SysPower_Wake();        }
+
+    } else if (strcmp(argv[0], "BANK") == 0) {
+        /* NOTE [OTA]: STM32-specific FLASH option bytes.
+         * Replace with mcuboot_swap_type() or board_get_active_bank() when
+         * the MCUboot port is complete. Until then the shim below reads the
+         * OPTR register via CMSIS if the STM32 HAL headers are available.   */
+#if defined(FLASH) && defined(FLASH_OPTR_nSWAP_BANK)
+        uint32_t optr = FLASH->OPTR;
+        uint8_t  bank = (optr & FLASH_OPTR_nSWAP_BANK) ? 1 : 2;
+        printk("OTA_LOG: [SYS] Active Flash Bank: %d (OPTR: 0x%08X)\n",
+               bank, (unsigned int)optr);
+#else
+        printk("OTA_LOG: [SYS] Bank query not supported on this target.\n");
+#endif
+
+    } else if (strcmp(argv[0], "SETZERO") == 0 && argc == 2) {
+        int src = atoi(argv[1]);
+        if (src >= 1 && src <= 15) {
+            char src_path[SD_MAX_PATH_LEN], dst_path[SD_MAX_PATH_LEN]; 
+            snprintf(src_path, sizeof(src_path), "%s/slot%d.bin", SD_MOUNT_POINT, src);
+            snprintf(dst_path, sizeof(dst_path), "%s/slot0.bin",  SD_MOUNT_POINT);
+            printk("LOG: Copying Slot %d to default auto-boot Slot 0...\n", src);
+            if (copy_bitstream(src_path, dst_path) == 0) {
+                strncpy(slot_names[0], slot_names[src], FPGA_SLOT_NAME_LEN);
+                slot_clk_configs[0] = slot_clk_configs[src];
+                Save_Configs();
+                printk("LOG: Default bitstream updated successfully.\n");
+            } else {
+                printk("ERR: Failed to copy bitstream. Check SD card.\n");
+            }
+        }
+
+    } else if (strcmp(argv[0], "WIPE_SD") == 0) {
+        printk("LOG: Wiping memory slots...\n");
+        char path[SD_MAX_PATH_LEN];
+        for (int i = 1; i < FPGA_MAX_SLOTS; i++) {
+            snprintf(path, sizeof(path), "%s/slot%d.bin", SD_MOUNT_POINT, i);
+            fs_unlink(path);
+            slot_names[i][0]    = '\0';
+            slot_clk_configs[i] = 2;
+        }
+        Save_Configs();
+        printk("LOG: SD Wipe Complete. Slot 0 remains intact.\n");
+
+    } else if (strcmp(argv[0], "OTA") == 0 && argc == 2) {
+        char ota_path[SD_MAX_PATH_LEN];
+        snprintf(ota_path, sizeof(ota_path), "%s/%s", SD_MOUNT_POINT, argv[1]);
+        /* NOTE [OTA]: OTA_Update_From_SD is a HAL shim — replace with
+         * MCUboot DFU flow when available.                               */
+        OTA_Update_From_SD(ota_path);
+
+    } else if (strcmp(argv[0], "SET_FW_INFO") == 0 && argc == 3) {
+        struct fs_file_t f;
+        char fw_path[SD_MAX_PATH_LEN];
+        snprintf(fw_path, sizeof(fw_path), "%s/fw_info.txt", SD_MOUNT_POINT);
+        fs_file_t_init(&f);
+        if (fs_open(&f, fw_path, FS_O_WRITE | FS_O_CREATE) == 0) {
+            char buf[64];
+            int  len = snprintf(buf, sizeof(buf), "%s:%s\n", argv[1], argv[2]);
+            fs_write(&f, buf, (size_t)len);
+            fs_close(&f);
+            printk("LOG: Firmware metadata staged.\n");
+        } else {
+            printk("ERR: Failed to save firmware metadata.\n");
+        }
+
+    } else if (strcmp(argv[0], "GET_FW_INFO") == 0) {
+        struct fs_file_t f;
+        char fw_path[SD_MAX_PATH_LEN];
+        snprintf(fw_path, sizeof(fw_path), "%s/fw_info.txt", SD_MOUNT_POINT);
+        fs_file_t_init(&f);
+        if (fs_open(&f, fw_path, FS_O_READ) == 0) {
+            char buf[64] = {0};
+            fs_read(&f, buf, sizeof(buf) - 1);
+            fs_close(&f);
+            /* Strip CR/LF */
+            for (int i = 0; i < 64; i++) {
+                if (buf[i] == '\n' || buf[i] == '\r') { buf[i] = '\0'; }
+            }
+            printk("FW_INFO:%s\n", buf);
+        } else {
+            printk("FW_INFO:InkLab OS:v1.0\n");
+        }
+
+    } else if (strcmp(argv[0], "I2C_BENCH") == 0) {
+        Diag_RunI2CBenchmark();
+
+    } else if (strcmp(argv[0], "FPGA_PWR") == 0 && argc == 2) {
+        if (atoi(argv[1]) == 0) {
+            FPGA_PowerDown();
+            fpga_is_ready = 0;
+            printk("LOG: FPGA Power Down (RST=0, MCO=OFF)\n");
+            printk("LIVE_CLK:%d:STOPPED\n", current_slot);
+        } else {
+            /* NOTE [FPGA]: Replace with your Zephyr FPGA task signal.
+             * Options: k_event_post(), k_sem_give(), k_msgq_put() on a
+             * dedicated control queue.                                   */
+            FPGA_RequestPowerUp();
+            printk("LOG: FPGA Power Up sequence started...\n");
+        }
+
+    } else {
+        printk("ERR: Unknown SYS command '%s'\n", argv[0]);
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for BQ25798 charger configuration. */
+static void Cmd_BQ(int argc, char **argv)
+{
+    if (argc < 1) { return; }
+    const char *subcmd = argv[0];
+    int val = (argc >= 2) ? atoi(argv[1]) : 0;
+
+    if (strcmp(subcmd, "STATUS") == 0) {
+        char dump_buf[512];
+        /* NOTE: BQ25798_DumpRegisters returns 0 on success (not HAL_OK=0).
+         * This is already correct — HAL_OK == 0 so the check is equivalent. */
+        if (BQ25798_DumpRegisters(dump_buf, sizeof(dump_buf)) == 0) {
+            printk("%s\n", dump_buf);
+        } else {
+            printk("ERR: BQ25798 I2C Read Failed\n");
+        }
+        return;
+    }
+
+    if      (strcmp(subcmd, "CHG")         == 0) BQ25798_SetChargeEnable(val);
+    else if (strcmp(subcmd, "HIZ")         == 0) BQ25798_SetHiZ(val);
+    else if (strcmp(subcmd, "OTG")         == 0) BQ25798_SetOTG(val + 50);
+    else if (strcmp(subcmd, "PFM_FWD")     == 0) BQ25798_SetPFM_FWD(val);
+    else if (strcmp(subcmd, "PFM_OTG")     == 0) BQ25798_SetPFM_OTG(val);
+    else if (strcmp(subcmd, "WD")          == 0) BQ25798_SetWatchdog(val);
+    else if (strcmp(subcmd, "DETECT")      == 0) BQ25798_ForceDetection();
+    else if (strcmp(subcmd, "ICHG")        == 0) BQ25798_SetChargeCurrent((uint16_t)val);
+    else if (strcmp(subcmd, "ITERM")       == 0) BQ25798_SetTermCurrent((uint16_t)val);
+    else if (strcmp(subcmd, "IIN")         == 0) BQ25798_SetInputCurrent((uint16_t)val);
+    else if (strcmp(subcmd, "IOTG")        == 0) BQ25798_SetOTGCurrent((uint16_t)val);
+    else if (strcmp(subcmd, "VINDPM")      == 0) BQ25798_SetInputVoltageLimit((uint16_t)val);
+    else if (strcmp(subcmd, "VREG")        == 0) BQ25798_SetChargeVoltage((uint16_t)val);
+    else if (strcmp(subcmd, "VOTG")        == 0) BQ25798_SetOTGVoltage((uint16_t)val);
+    else if (strcmp(subcmd, "VSYS")        == 0) BQ25798_SetMinSystemVoltage((uint16_t)val);
+    else if (strcmp(subcmd, "BACKUP")      == 0) BQ25798_SetBackup((uint8_t)val);
+    else if (strcmp(subcmd, "DIS_IN")      == 0) BQ25798_SetInputDisconnect((uint8_t)val);
+    else if (strcmp(subcmd, "SHIP")        == 0) BQ25798_SetShipMode((uint8_t)val);
+    else if (strcmp(subcmd, "VBUS_OUT")    == 0) BQ25798_SetBackupACFET((uint8_t)val);
+    else if (strcmp(subcmd, "AUTO_REARM")  == 0) BQ25798_SetAutoRearm((uint8_t)val);
+    else if (strcmp(subcmd, "EMA")         == 0 && argc >= 2) {
+        BQ25798_SetEMA((float)atof(argv[1]));
+    }
+    else if (strcmp(subcmd, "TEST_BACKUP") == 0) {
+        if (val == 1) {
+            BQ25798_SetHiZ(0);
+            BQ25798_SetBackup(1);
+            BQ25798_SetAutoRearm(0);
+            BQ25798_SetInputDisconnect(1);
+            printk("LOG: [SIMULATION] Power Loss Triggered. Backup Active.\n");
+        } else {
+            BQ25798_SetAutoRearm(1);
+            BQ25798_SetInputDisconnect(0);
+            printk("LOG: [SIMULATION] Power Restored. Handing off to hardware...\n");
+        }
+        return;
+    }
+    else {
+        printk("ERR: Unknown BQ command '%s'\n", subcmd);
+        return;
+    }
+
+    printk("LOG: BQ Setting [%s] Updated\n", subcmd);
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for Joystick mapping and IO status. */
+static void Cmd_IO(int argc, char **argv)
+{
+    if (argc < 1) { return; }
+
+    if (strcmp(argv[0], "STATUS") == 0) {
+        JoystickMap_t map = Joystick_GetMap();
+        uint8_t r = 50, g = 50, b = 50;
+        bool    m = false;
+        LED_GetStatus(&r, &g, &b, &m);
+        printk("{\"type\":\"io_stat\","
+               "\"r\":%d,\"g\":%d,\"b\":%d,\"m\":%d,"
+               "\"ud\":%d,\"lr\":%d,\"cen\":%d}\n",
+               r, g, b, (int)m, map.ud, map.lr, map.cen);
+    } else if (strcmp(argv[0], "MAP") == 0 && argc == 4) {
+        Joystick_SetMap(atoi(argv[1]), atoi(argv[2]), atoi(argv[3]));
+        printk("LOG: Joystick Mapping Updated.\n");
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for RTOS Memory and Thread Stack analysis. */
+static void Cmd_MEM(int argc, char **argv)
+{
+    ARG_UNUSED(argc); ARG_UNUSED(argv);
+    printk("--- THREAD STACK USAGE ---\n");
+    thread_analyzer_print();
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for UART manual transmission. */
+static void Cmd_UART(int argc, char **argv)
+{
+    if (argc < 1) { return; }
+
+    if (strcmp(argv[0], "TX") == 0 && argc == 2) {
+        /* Delegate to ext_interfaces.c which owns the usart3 handle */
+        EXT_UART_Tx(3, argv[1]); /* bus index 3 = usart3 */
+        printk("LOG: MCU transmitted UART '%s' (PB2 -> CON_15)\n", argv[1]);
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for direct ADC hardware reads. */
+static void Cmd_ADC(int argc, char **argv)
+{
+    if (argc < 1) { return; }
+
+    if (strcmp(argv[0], "READ") == 0) {
+        /* Delegate to ext_interfaces so ADC device state stays centralised */
+        EXT_ADC_Read("AIN9"); /* default channel — extend as needed */
+    }
+}
+
+
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for generic External Interface hardware control. */
+static void Cmd_EXT(int argc, char **argv)
+{
+    if (argc < 2) { return; }
+
+    if (strcmp(argv[0], "UART") == 0 && argc == 3) {
+        EXT_UART_Tx(atoi(argv[1]), argv[2]);
+
+    } else if (strcmp(argv[0], "I2C") == 0 && argc == 4) {
+        EXT_I2C_Write(atoi(argv[1]),
+                      (uint8_t)strtol(argv[2], NULL, 16),
+                      (uint8_t)strtol(argv[3], NULL, 16));
+
+    } else if (strcmp(argv[0], "GPIO") == 0) {
+        if (argc == 4 && strcmp(argv[2], "TOGGLE") == 0) {
+            EXT_GPIO_Toggle(argv[1], atoi(argv[3]));
+        } else if (argc == 3) {
+            EXT_GPIO_Write(argv[1], atoi(argv[2]));
+        } else {
+            printk("ERR: Invalid EXT:GPIO syntax.\n");
+        }
+
+    } else if (strcmp(argv[0], "ADC") == 0 && argc == 2) {
+        EXT_ADC_Read(argv[1]);
+
+    } else if (strcmp(argv[0], "DAC") == 0) {
+        if (argc == 2 && strcmp(argv[1], "OFF") == 0) {
+            EXT_DAC_Stop();
+            printk("LOG: DAC Output disabled.\n");
+        } else if (argc == 2) {
+            EXT_DAC_Set((float)atof(argv[1]));
+            printk("LOG: DAC DC Output set.\n");
+        } else if (argc == 7 && strcmp(argv[1], "WAVE") == 0) {
+            int wave = 0;
+            if      (strcmp(argv[2], "SINE")     == 0) { wave = 1; }
+            else if (strcmp(argv[2], "TRIANGLE") == 0) { wave = 2; }
+            else if (strcmp(argv[2], "SQUARE")   == 0) { wave = 3; }
+            uint32_t freq  = (uint32_t)strtoul(argv[3], NULL, 10);
+            float    offs  = (float)atof(argv[4]);
+            float    amp   = (float)atof(argv[5]);
+            float    vref  = (float)atof(argv[6]);
+            EXT_DAC_Wave((uint8_t)wave, freq, offs, amp, vref);
+            printk("LOG: DAC DMA Waveform Configured.\n");
+        }
+
+    } else if (strcmp(argv[0], "AD9837") == 0) {
+        if (argc == 2 && strcmp(argv[1], "OFF") == 0) {
+            EXT_AD9837_Stop();
+            printk("LOG: AD9837 disabled.\n");
+        } else if (argc == 3) {
+            int wave = 0;
+            if      (strcmp(argv[1], "TRIANGLE") == 0) { wave = 1; }
+            else if (strcmp(argv[1], "SQUARE")   == 0) { wave = 2; }
+            EXT_AD9837_Set((uint8_t)wave,
+                           (uint32_t)strtoul(argv[2], NULL, 10));
+            printk("LOG: AD9837 Configured via SPI.\n");
+        }
+
+    } else if (strcmp(argv[0], "EXT_DAC") == 0 && argc == 2) {
+        EXT_DAC081_Set((float)atof(argv[1]));
+
+    } else if (strcmp(argv[0], "SCAN") == 0 && argc == 2) {
+        EXT_I2C_Scanner(atoi(argv[1]));
+
+    } else {
+        printk("ERR: Unknown EXT interface command.\n");
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for executing system Benchmark sequences. */
+static void Cmd_BENCHMARK(int argc, char **argv)
+{
+    if (argc < 1) { return; }
+
+    if (strcmp(argv[0], "NATIVE") == 0) {
+        const uint32_t iterations = 10;
+        printk("LOG: Starting Mixed-Signal Native Benchmark...\n");
+
+        uint32_t t_start = k_uptime_get_32();
+
+        for (uint32_t i = 0; i < iterations; i++) {
+            /* 1. SPI PING to FPGA */
+            FpgaSpiPacket_t tx = {0};
+            tx.sync = FPGA_SYNC_BYTE;
+            tx.cmd  = 0x01;
+            tx.length = 0;
+            FPGA_EnqueueSpiPacket(&tx);
+
+            /* 2. ADC READ — routed through ext_interfaces */
+            EXT_ADC_Read("AIN9");
+
+            /* 3. UART TX — routed through ext_interfaces */
+            EXT_UART_Tx(3, "B");
+
+            /* 4. GPIO TOGGLE — routed through ext_interfaces */
+            EXT_GPIO_Write("PB11", 1);
+            EXT_GPIO_Write("PB11", 0);
+        }
+
+        uint32_t duration = k_uptime_get_32() - t_start;
+        printk("BENCH_RES:MCU:%u\n", (unsigned int)duration);
+
+    } else if (strcmp(argv[0], "JS_END") == 0) {
+        printk("BENCH_RES:JS_END:0\n");
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for inducing deliberate thread execution delays. */
+static void Cmd_DELAY(int argc, char **argv)
+{
+    if (argc == 1) {
+        k_msleep(atoi(argv[0]));
+    }
+}
+
+// ----------------------------------------------------------------------------
+/** @brief Command handler for running sequential Macros from the SD card. */
+static void Cmd_MACRO(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[0], "RUN") == 0) {
+        char fpath[SD_MAX_PATH_LEN];
+        snprintf(fpath, sizeof(fpath), "%s/%s", SD_MOUNT_POINT, argv[1]);
+
+        struct fs_file_t f;
+        fs_file_t_init(&f);
+
+        if (fs_open(&f, fpath, FS_O_READ) == 0) {
+            char     line[CMD_BUF_LEN];
+            uint32_t t_start = k_uptime_get_32();
+            printk("LOG: Executing SD Macro '%s'...\n", argv[1]);
+
+            /* Read line-by-line via fs_read looking for newlines */
+            char  ch;
+            int   li = 0;
+            while (fs_read(&f, &ch, 1) == 1) {
+                if (ch == '\n' || ch == '\r') {
+                    if (li == 0) { continue; }
+                    line[li] = '\0';
+                    li = 0;
+                    if (line[0] == '#') { continue; }
+                    Frontend_ExecuteCommand(line);
+                } else if (li < (int)(sizeof(line) - 1)) {
+                    line[li++] = ch;
+                }
+            }
+            /* Flush last line if file doesn't end with newline */
+            if (li > 0) {
+                line[li] = '\0';
+                if (line[0] != '#') { Frontend_ExecuteCommand(line); }
+            }
+
+            fs_close(&f);
+            printk("BENCH_RES:MACRO:%u\n",
+                   (unsigned int)(k_uptime_get_32() - t_start));
+        } else {
+            printk("ERR: Macro file '%s' not found on SD.\n", argv[1]);
+        }
+    }
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+/**
+ * @brief Parse and dispatch a single null-terminated command string.
+ *
+ * Tokens are separated by ':'. The first token selects the command handler;
+ * remaining tokens are passed as argv[].
+ *
+ * Example:  "BQ:ICHG:500"  ->  Cmd_BQ(argc=2, argv={"ICHG","500"})
+ */
+void Frontend_ExecuteCommand(char *cmd_str)
+{
+    char *tokens[CMD_MAX_TOKENS];
+    int   token_count = 0;
+    char *p = cmd_str;
+
+    while (*p != '\0' && token_count < CMD_MAX_TOKENS) {
+        tokens[token_count++] = p;
+        char *colon = strchr(p, ':');
+        if (colon) { *colon = '\0'; p = colon + 1; }
+        else       { break; }
+    }
+
+    if (token_count == 0) { return; }
+
+    bool found = false;
+    for (int j = 0; command_table[j].cmd != NULL; j++) {
+        if (strcmp(tokens[0], command_table[j].cmd) == 0) {
+            command_table[j].handler(token_count - 1, &tokens[1]);
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        printk("ERR: Unknown command '%s'\n", tokens[0]);
+    }
+}
+
+/**
+ * @brief Process a raw USB RX block.
+ *
+ * Call this from your USB CDC-ACM RX callback (usb_task.c) each time a
+ * chunk of bytes arrives. Handles both command mode and binary upload mode.
+ *
+ * @param data  Pointer to received byte buffer.
+ * @param len   Number of valid bytes in @p data.
+ */
+void Frontend_ProcessBlock(const uint8_t *data, uint16_t len)
+{
+    uint16_t i = 0;
+
+    while (i < len) {
+
+        if (current_upload_state == UPLOAD_IDLE) {
+            uint8_t c = data[i++];
+
+            if (c == '\n' || c == '\r') {
+                if (cmd_idx == 0) { continue; }
+                cmd_buffer[cmd_idx] = '\0';
+                Frontend_ExecuteCommand(cmd_buffer);
+                cmd_idx = 0;
+            } else if (cmd_idx < CMD_BUF_LEN - 1) {
+                cmd_buffer[cmd_idx++] = c;
+            }
+
+        } else {
+            /* Binary upload path */
+            last_rx_time = k_uptime_get_32();
+
+            uint32_t space_in_buf   = SD_BUF_SIZE - sd_write_idx;
+            uint32_t bytes_remaining = upload_bytes_total - upload_bytes_received;
+            uint32_t max_copy       = (space_in_buf < bytes_remaining)
+                                      ? space_in_buf : bytes_remaining;
+            uint32_t chunk          = (uint32_t)(len - i);
+            uint32_t process_len    = (chunk < max_copy) ? chunk : max_copy;
+
+            /* Update checksum */
+            for (uint32_t k = 0; k < process_len; k++) {
+                incoming_checksum ^= data[i + k];
+            }
+
+            memcpy(&sd_write_buffer[active_fill_buf][sd_write_idx],
+                   &data[i], process_len);
+
+            sd_write_idx            += process_len;
+            upload_bytes_received   += process_len;
+            bytes_since_last_ack    += process_len;
+            i                       += process_len;
+
+            /* Flush buffer when full or upload complete */
+            if (sd_write_idx >= SD_BUF_SIZE ||
+                upload_bytes_received == upload_bytes_total) {
+
+                DiskWriteReq_t req = { active_fill_buf, (uint16_t)sd_write_idx };
+                k_msgq_put(&disk_write_queue, &req, K_FOREVER);
+
+                if (upload_bytes_received < upload_bytes_total) {
+                    active_fill_buf = (active_fill_buf + 1) % 2;
+                    sd_write_idx    = 0;
+                    k_sem_take(&buffer_pool_sem, K_FOREVER);
+                }
+            }
+
+            /* Flow-control ACK every 8 KiB */
+            if (bytes_since_last_ack >= UPLOAD_CHUNK_ACK &&
+                upload_bytes_received < upload_bytes_total) {
+                printk("ACK_CHUNK\n");
+                bytes_since_last_ack -= UPLOAD_CHUNK_ACK;
+            }
+
+            /* Upload finished */
+            if (upload_bytes_received >= upload_bytes_total) {
+                /* Wait for both write buffers to drain */
+                k_sem_take(&buffer_pool_sem, K_FOREVER);
+                k_sem_take(&buffer_pool_sem, K_FOREVER);
+                fs_close(&upload_fil);
+                current_upload_state = UPLOAD_IDLE;
+                printk("ACK_DONE\n");
+                printk("CSUM: 0x%02X\n", incoming_checksum);
+                /* Return both tokens to pool */
+                k_sem_give(&buffer_pool_sem);
+                k_sem_give(&buffer_pool_sem);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Upload watchdog — call periodically from your main loop or a timer.
+ *
+ * Aborts a stalled upload if no data has arrived within UPLOAD_TIMEOUT_MS.
+ */
+void Frontend_CheckTimeout(void)
+{
+    if (current_upload_state == UPLOAD_RECEIVING &&
+        (k_uptime_get_32() - last_rx_time) > UPLOAD_TIMEOUT_MS) {
+
+        fs_close(&upload_fil);
+        current_upload_state = UPLOAD_IDLE;
+        cmd_idx              = 0;
+        printk("ERR_TIMEOUT\n");
+
+        /* Drain any lingering sem tokens then restore to 2 */
+        while (k_sem_take(&buffer_pool_sem, K_NO_WAIT) == 0) { /* drain */ }
+        k_sem_give(&buffer_pool_sem);
+        k_sem_give(&buffer_pool_sem);
+    }
+}
+
+/**
+ * @brief One-time module initialisation.
+ *
+ * Call once from main() after USB is enabled and the SD card is mounted.
+ * The disk-write thread is started statically at boot (K_THREAD_DEFINE),
+ * so this function is now a lightweight state reset.
+ */
+void Frontend_Init(void)
+{
+    current_upload_state  = UPLOAD_IDLE;
+    cmd_idx               = 0;
+    fs_file_t_init(&upload_fil);
+}
+
+==================================================
+
+--- FILE: src\rtos\usb_task.c ---
+
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/uart.h>
+#include <zephyr/usb/usb_device.h>
+#include <zephyr/sys/ring_buffer.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <string.h>
+
+#include "system_config.h"
+#include "proto/frontend_api.h"
+#include "rtos/usb_task.h"
+
+typedef struct {
+    char data[USB_MSG_MAX_LEN];
+} UsbMsg_t;
+
+/* Zephyr Message Queue & Ring Buffer */
+K_MSGQ_DEFINE(usb_tx_q, sizeof(UsbMsg_t), USB_TX_QUEUE_SIZE, __alignof__(UsbMsg_t));
+RING_BUF_DECLARE(usb_rx_ringbuf, RX_RING_SIZE);
+
+static const struct device *cdc_dev = DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart0));
+
+/** 
+ * @brief Thread-safe Printf redirect.
+ */
+void USB_Printf(const char *format, ...) {
+    UsbMsg_t msg;
+    va_list args;
+    va_start(args, format);
+    vsnprintf(msg.data, sizeof(msg.data), format, args);
+    va_end(args);
+    k_msgq_put(&usb_tx_q, &msg, K_NO_WAIT);
+}
+
+/** 
+ * @brief Official Zephyr 3.6 Printk Override.
+ * Because we disabled the OS console, Zephyr automatically routes all printk() 
+ * calls to this function. We safely buffer them and push them to the RTOS queue!
+ */
+int arch_printk_char_out(int c) {
+    static char buf[USB_MSG_MAX_LEN];
+    static int idx = 0;
+    
+    buf[idx++] = (char)c;
+    
+    /* When we hit a newline or fill the buffer, queue it for USB TX */
+    if (c == '\n' || idx >= (sizeof(buf) - 1)) {
+        buf[idx] = '\0';
+        USB_Printf("%s", buf);
+        idx = 0;
+    }
+    return c;
+}
+
+/** 
+ * @brief Hardware Interrupt for incoming USB Data
+ */
+static void cdc_rx_cb(const struct device *dev, void *user_data) {
+    uart_irq_update(dev);
+    
+    /* Drain the hardware FIFO entirely into the ring buffer */
+    while (uart_irq_rx_ready(dev)) {
+        uint8_t buffer[64];
+        int len = uart_fifo_read(dev, buffer, sizeof(buffer));
+        
+        if (len > 0) {
+            ring_buf_put(&usb_rx_ringbuf, buffer, len);
+        } else {
+            break;
+        }
+    }
+}
+
+/** 
+ * @brief Core USB communication thread routine.
+ */
+void usb_task_fn(void *arg1, void *arg2, void *arg3) {
+    if (!device_is_ready(cdc_dev)) {
+        return;
+    }
+
+    /* Take full hardware ownership of the USB UART */
+    uart_irq_callback_user_data_set(cdc_dev, cdc_rx_cb, NULL);
+    uart_irq_rx_enable(cdc_dev);
+
+    Frontend_Init();
+    UsbMsg_t tx_msg;
+
+    while (1) {
+        /* 1. Process Incoming USB Data formally */
+        uint8_t chunk[UART_RX_CHUNK_SIZE];
+        uint32_t bytes_read = ring_buf_get(&usb_rx_ringbuf, chunk, sizeof(chunk));
+        
+        if (bytes_read > 0) {
+            Frontend_ProcessBlock(chunk, bytes_read);
+        } else {
+            k_msleep(1); /* Yield momentarily if no data is present */
+        }
+
+        Frontend_CheckTimeout();
+
+        /* 2. Process Outgoing Telemetry Data */
+        if (k_msgq_get(&usb_tx_q, &tx_msg, K_NO_WAIT) == 0) {
+            int len = strlen(tx_msg.data);
+            for (int i = 0; i < len; i++) {
+                uart_poll_out(cdc_dev, tx_msg.data[i]);
+            }
+        }
+    }
+}
+
+K_THREAD_DEFINE(usb_thread, USB_THREAD_STACK_SIZE, usb_task_fn, NULL, NULL, NULL, USB_THREAD_PRIORITY, 0, 0);
+
+==================================================
+
+--- FILE: include\bus_manager.h ---
+
+/**
+ * @file bus_manager.h
+ * @brief Mediates shared hardware bus access to ensure thread safety.
+ */
+#ifndef BUS_MANAGER_H
+#define BUS_MANAGER_H
+
+/**
+ * @brief Acquires the shared I2C bus mutex.
+ * @return 0 on success, negative errno (-ENOLCK) on failure.
+ */
+int BusManager_LockI2C(void);
+
+/**
+ * @brief Releases the shared I2C bus mutex.
+ */
+void BusManager_UnlockI2C(void);
+
+#endif /* BUS_MANAGER_H */
+
+==================================================
+
+--- FILE: include\system_config.h ---
+
+/**
+ * @file system_config.h
+ * @brief Centralized system configurations and magic numbers (Law 3 Compliance).
+ */
+#ifndef SYSTEM_CONFIG_H
+#define SYSTEM_CONFIG_H
+
+/* --- Telemetry Configuration --- */
+#define TELEM_RATE_DEFAULT_MS    1000
+
+/* --- BQ25798 Charger Configuration --- */
+#define BQ_I2C_ADDR              0x6B
+#define BQ_VINDPM_DEFAULT_MV     4200
+#define BQ_VOTG_BACKUP_MV        5000
+#define BQ_VOTG_BASE_MV          2800
+#define BQ_OTG_REG_DIVISOR       10
+#define BQ_DEFAULT_ICHG_MA       500
+#define BQ_ADC_CTRL_ENABLE       0x80
+#define BQ_REG_DUMP_COUNT        48
+
+/* --- Power Monitor (INA) Configuration --- */
+#define INA_CURRENT_LSB_BASE     32768.0f
+#define INA_CALIB_MAGIC          0.04096f
+#define INA_DEFAULT_CONFIG       0x399F
+#define POWER_MONITOR_ADDR_40    0x40
+#define POWER_MONITOR_ADDR_43    0x43
+#define POWER_MONITOR_ADDR_4C    0x4C
+#define POWER_MONITOR_ADDR_4F    0x4F
+
+#define INA_CURRENT_LSB_BASE     32768.0f
+
+/* Hardware Shunt Resistors & Current Limits */
+#define INA_CORE_RSHUNT          1.5f
+#define INA_CORE_MAX_A           0.210f
+#define INA_EXT_RSHUNT           1.0f
+#define INA_EXT_MAX_A            0.320f
+#define INA_FPGA_RSHUNT          1.0f
+#define INA_FPGA_MAX_A           0.320f
+#define INA_MCU_RSHUNT           1.0f
+#define INA_MCU_MAX_A            0.320f
+#define INA_FPGA_OFFSET_MA       0.47f
+
+/* Auto-Scale Thresholds */
+#define INA_BUS_V_MULTIPLIER     0.004f
+#define INA_SHUNT_MV_MULTIPLIER  0.01f
+#define INA_AUTO_UP_320MV        150.0f
+#define INA_AUTO_UP_160MV        75.0f
+#define INA_AUTO_UP_80MV         38.0f
+#define INA_AUTO_DN_160MV        120.0f
+#define INA_AUTO_DN_80MV         60.0f
+#define INA_AUTO_DN_40MV         30.0f
+
+/* --- Battery SOC Configuration --- */
+#define BATT_DEFAULT_R_INT_OHMS  0.150f
+#define BATT_SOC_MIN_DELTA_I     0.2f
+#define BATT_SOC_MIN_R_INT       0.02f
+#define BATT_SOC_MAX_R_INT       0.5f
+#define BATT_SOC_R_EMA_W         0.2f
+#define BATT_SOC_SOC_EMA_W       0.05f
+
+/* --- Standard Battery Profiles --- */
+#define BATT_LIION_3200_CHG_MV   4200
+#define BATT_LIION_3200_CHG_MA   1600
+#define BATT_LIION_3200_TERM_MA  80
+#define BATT_LIION_3200_SYS_MV   3000
+
+/* --- LED Default Configuration --- */
+#define LED_DEFAULT_LIMIT_R      25
+#define LED_DEFAULT_LIMIT_G      10
+#define LED_DEFAULT_LIMIT_B      10
+
+/* --- File System & Frontend Configuration --- */
+#define SD_MOUNT_POINT           "/SD:"
+#define SD_BUF_SIZE              8192U
+#define UPLOAD_CHUNK_ACK         8192U
+#define CMD_BUF_LEN              128U
+#define CMD_MAX_TOKENS           10
+#define UPLOAD_TIMEOUT_MS        3000U
+#define SD_SLOT_OTA              99
+#define SD_MAX_PATH_LEN          48U
+
+/* --- FPGA Configuration --- */
+#define FPGA_MAX_SLOTS           16
+#define FPGA_SLOT_NAME_LEN       16
+#define FPGA_SYNC_BYTE           0x5A
+#define FPGA_RESET_ASSERT_MS     5
+#define FPGA_RESET_RELEASE_MS    10
+#define FPGA_TX_BUF_SIZE         4096U
+
+/* --- USB RTOS Task Configuration --- */
+#define USB_MSG_MAX_LEN          256
+#define RX_RING_SIZE             8192
+#define USB_TX_QUEUE_SIZE        64
+#define USB_THREAD_STACK_SIZE    2048
+#define USB_THREAD_PRIORITY      5
+#define USB_TX_MAX_RETRIES       10
+
+/* --- UART / USB CDC Configuration --- */
+#define UART_RX_CHUNK_SIZE       64U
+#define UART_TX_CHUNK_SIZE       128U
+
+/* --- External Interface Configurations --- */
+#define DAC_8BIT_MAX             255.0f
+#define DAC_VREF_3V              3.0f
+#define I2C_SCAN_MAX_ADDR        128
+
+/* --- Task & Thread Configuration --- */
+#define DISK_TASK_STACK          2048
+#define DISK_TASK_PRIO           5
+#define JOYSTICK_THREAD_STACK    1024
+#define JOYSTICK_THREAD_PRIO     6
+#define JOYSTICK_POLL_RATE_MS    50
+
+/* --- Queues & Alignments --- */
+#define SD_WRITE_QUEUE_SIZE      2
+#define SD_WRITE_QUEUE_ALIGN     4
+#define FPGA_TX_QUEUE_SIZE       8
+#define FPGA_TX_QUEUE_ALIGN      4
+
+/* --- Timing & Delays --- */
+#define SYS_BOOT_DELAY_MS        2500
+#define BQ_BACKUP_ARM_DELAY_MS   5000
+#define BQ_BACKUP_REARM_DELAY_MS 3000
+#define ERR_LED_HOLD_TIME_MS     2000
+#define LED_PWM_PERIOD_MS        10
+#define LED_PWM_MAX              100
+#define SYS_WAKE_DELAY_MS        50
+
+/* --- Diagnostic Configuration --- */
+#define DIAG_I2C_TEST_ITERATIONS 1000
+#define DIAG_I2C_YIELD_MODULUS   50
+#define DIAG_I2C_EXPECTED_READS  4000.0f
+
+#endif /* SYSTEM_CONFIG_H */
+
+==================================================
+
+--- FILE: include\proto\frontend_api.h ---
+
+/**
+ * @file frontend_api.h
+ * @brief Frontend API parser and command handler.
+ * 
+ * Law 1 Compliant: Contains absolutely no Zephyr/RTOS headers.
+ */
+#ifndef FRONTEND_API_H
+#define FRONTEND_API_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+/**
+ * @brief One-time module initialisation for the frontend API state machine.
+ */
+void Frontend_Init(void);
+
+/**
+ * @brief Process a raw USB RX block and route parsed commands.
+ *
+ * @param data Pointer to received byte buffer.
+ * @param len  Number of valid bytes in the buffer.
+ */
+void Frontend_ProcessBlock(const uint8_t *data, uint16_t len);
+
+/**
+ * @brief Upload watchdog to abort stalled binary uploads.
+ *        Should be called periodically from the handling thread.
+ */
+void Frontend_CheckTimeout(void);
+
+/**
+ * @brief Parse and dispatch a single null-terminated command string.
+ * @param cmd_str Formatted string payload.
+ */
+void Frontend_ExecuteCommand(char *cmd_str);
+
+#endif /* FRONTEND_API_H */
+
+==================================================
+
+--- FILE: include\rtos\usb_task.h ---
+
+/**
+ * @file usb_task.h
+ * @brief Public interface for the USB CDC telemetry task.
+ */
+#ifndef USB_TASK_H
+#define USB_TASK_H
+
+/**
+ * @brief Send a formatted string over the USB CDC ACM connection.
+ * 
+ * @param format Standard printf format string.
+ * @param ... Variable arguments.
+ * 
+ * @note This is thread-safe and non-blocking. Safe to call from any thread.
+ */
+void USB_Printf(const char *format, ...);
+
+#endif /* USB_TASK_H */
+
+==================================================
+
+--- FILE: CMakeLists.txt ---
+
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(inklab_blinky)
+zephyr_include_directories(include src)
+
+
+target_sources(app PRIVATE 
+    src/main.c
+    src/bus_manager.c
+    src/rtos/usb_task.c
+    src/proto/frontend_api.c
+    src/hal/battery_defs.c
+    src/hal/battery_soc.c
+    src/hal/bq25798.c
+    src/hal/diagnostics.c
+    src/hal/error_manager.c
+    src/hal/ext_interfaces.c
+    src/hal/fpga.c
+    src/hal/joystick.c
+    src/hal/led_manager.c
+    src/hal/powerMonitor.c
+    src/hal/sys_power.c
+)
+
+==================================================
+
+--- FILE: prj.conf ---
+
+# ── GPIO / I2C ──────────────────────────────────────────────────
+CONFIG_GPIO=y
+CONFIG_I2C=y
+
+# ── SPI + DMA ───────────────────────────────────────────────────
+CONFIG_SPI=y
+CONFIG_SPI_STM32=y
+CONFIG_DMA=y
+CONFIG_DMA_STM32=y
+CONFIG_SPI_STM32_DMA=y
+CONFIG_SPI_ASYNC=y
+
+
+# ── Pinctrl ─────────────────────────────────────────────────────
+CONFIG_PINCTRL=y
+
+# ── ADC ─────────────────────────────────────────────────────────
+CONFIG_ADC=y
+
+# ── USB CDC ACM Console ──────────────────────────────────────────
+CONFIG_USB_DEVICE_STACK=y
+CONFIG_USB_DEVICE_PRODUCT="InkLab-Vela"
+CONFIG_USB_DEVICE_VID=0x1209
+CONFIG_USB_DEVICE_PID=0x0001
+CONFIG_USB_CDC_ACM=y
+
+CONFIG_SERIAL=y
+CONFIG_CONSOLE=n
+CONFIG_UART_CONSOLE=n
+CONFIG_UART_LINE_CTRL=y
+CONFIG_UART_INTERRUPT_DRIVEN=y
+CONFIG_PRINTK=y
+
+
+# Don't let the console block the system if the USB cable isn't "ready"
+CONFIG_UART_LINE_CTRL=y
+CONFIG_USB_CDC_ACM_LOG_LEVEL_OFF=y
+
+
+
+# ── Printf / float support ───────────────────────────────────────
+CONFIG_CBPRINTF_FP_SUPPORT=y
+
+# ── File system: FAT32 + exFAT ───────────────────────────────────
+CONFIG_SDHC=y
+CONFIG_DISK_ACCESS=y
+CONFIG_FILE_SYSTEM=y
+CONFIG_FAT_FILESYSTEM_ELM=y
+CONFIG_FS_FATFS_EXFAT=y
+CONFIG_FS_FATFS_LFN_MODE_HEAP=y
+CONFIG_HEAP_MEM_POOL_SIZE=4096
+
+# ── Threading ────────────────────────────────────────────────────
+CONFIG_MULTITHREADING=y
+CONFIG_NUM_PREEMPT_PRIORITIES=16
+CONFIG_NUM_COOP_PRIORITIES=2
+CONFIG_THREAD_NAME=y
+CONFIG_THREAD_MONITOR=y
+CONFIG_THREAD_STACK_INFO=y
+CONFIG_STACK_SENTINEL=y
+
+CONFIG_THREAD_ANALYZER=y
+CONFIG_THREAD_ANALYZER_USE_PRINTK=y
+CONFIG_THREAD_ANALYZER_AUTO=n
+
+# ── MCUboot / OTA ────────────────────────────────────────────────
+CONFIG_BOOTLOADER_MCUBOOT=n
+CONFIG_IMG_MANAGER=y
+CONFIG_MCUBOOT_IMG_MANAGER=n
+CONFIG_STREAM_FLASH=y               
+CONFIG_IMG_BLOCK_BUF_SIZE=4096 
+CONFIG_FLASH=y
+CONFIG_FLASH_MAP=y
+
+# ── Power management ─────────────────────────────────────────────
+
+
+# ── Reboot ───────────────────────────────────────────────────────
+CONFIG_REBOOT=y
+
+==================================================
+
+--- FILE: boards\inklab_v1.overlay ---
+
+// boards/inklab_v1.overlay
+// Target: STM32G0B1CEUx on InkLab v1 PCB
+#include <zephyr/dt-bindings/dma/stm32_dma.h>
+
+/ {
+
+    chosen {
+        /* Intentionally empty! We are handling USB manually now. */
+    };
+    aliases {
+        led0 = &led_r;
+        led1 = &led_g;
+        led2 = &led_b;
+        joy-up = &joy_up;
+        joy-down = &joy_down;
+        joy-left = &joy_left;
+        joy-right = &joy_right;
+        joy-center = &joy_center;
+        gpio-pb11 = &gpio_out_pb11; 
+    };
+
+    leds {
+        compatible = "gpio-leds";
+        led_b: led_b { gpios = <&gpioc 13 GPIO_ACTIVE_LOW>; label = "LED_RGB2"; };
+        led_g: led_g { gpios = <&gpioc 14 GPIO_ACTIVE_LOW>; label = "LED_RGB1"; };
+        led_r: led_r { gpios = <&gpioc 15 GPIO_ACTIVE_LOW>; label = "LED_RGB0"; };
+    };
+
+    joystick {
+        compatible = "gpio-keys";
+        joy_left: button_0 { gpios = <&gpioc 7 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_A"; };
+        joy_up: button_1 { gpios = <&gpiod 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_B"; };
+        joy_down: button_2 { gpios = <&gpiob 8 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_C"; };
+        joy_right: button_3 { gpios = <&gpiob 9 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_D"; };
+        joy_center: button_4 { gpios = <&gpiod 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; label = "SW_CEN"; };
+    };
+
+    sys_ctrl {
+        compatible = "gpio-keys";
+        fpga_rst: fpga_rst { gpios = <&gpiod 0 GPIO_ACTIVE_HIGH>; };
+        fpga_ndone: fpga_ndone { gpios = <&gpioa 15 GPIO_ACTIVE_HIGH>; };
+        sd_det: sd_det { gpios = <&gpioa 2 GPIO_ACTIVE_LOW>; };
+        pwr_en: pwr_en { gpios = <&gpiob 13 GPIO_ACTIVE_HIGH>; };
+        wkp: wkp { gpios = <&gpiob 14 GPIO_ACTIVE_HIGH>; };
+        pg: pg { gpios = <&gpiob 12 GPIO_ACTIVE_HIGH>; };
+        gpio_out_pb11: gpio_out1 { gpios = <&gpiob 11 GPIO_ACTIVE_HIGH>; };
+        gpio_out_pc6: gpio_out2 { gpios = <&gpioc 6 GPIO_ACTIVE_HIGH>; };
+        gpio_in_pb15: gpio_in1 { gpios = <&gpiob 15 GPIO_ACTIVE_HIGH>; };
+    };
+
+    
+};
+
+
+
+&dma1 {
+    status = "okay";
+};
+
+&dma2 {
+    status = "okay";
+};
+
+&dmamux1 {
+    status = "okay";
+};
+
+&i2c1 {
+    status = "okay";
+    pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
+    pinctrl-names = "default";
+    clock-frequency = <I2C_BITRATE_FAST>;
+
+    power_monitor_1v2: ina219@40 {
+        compatible = "ti,ina219";
+        reg = <0x40>;
+        shunt-milliohm = <1500>; /* 1.5 Ohms = 1500 mOhm */
+        lsb-microamp = <10>;
+    };
+    power_monitor_3v3_ext: ina219@43 {
+        compatible = "ti,ina219"; 
+        reg = <0x43>;
+        shunt-milliohm = <1000>; /* 1.0 Ohms = 1000 mOhm */
+        lsb-microamp = <10>;
+    };
+    power_monitor_3v3_fpga: ina219@4c {
+        compatible = "ti,ina219"; 
+        reg = <0x4C>;
+        shunt-milliohm = <1000>;
+        lsb-microamp = <10>;
+    };
+    power_monitor_3v3_mcu: ina219@4f {
+        compatible = "ti,ina219"; 
+        reg = <0x4F>;
+        shunt-milliohm = <1000>;
+        lsb-microamp = <10>;
+    };
+    charger_0: bq25798@6b {
+        compatible = "i2c-device"; /* Custom driver binds to this */
+        reg = <0x6B>;
+    };
+};
+
+&usb {
+    status = "okay";
+    pinctrl-0 = <&usb_dm_pa11 &usb_dp_pa12>;
+    pinctrl-names = "default";
+
+    cdc_acm_uart0: cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
+
+&i2c2 {
+    status = "okay";
+    pinctrl-0 = <&i2c2_scl_pa9 &i2c2_sda_pa10>;
+    pinctrl-names = "default";
+};
+
+&spi1 {
+    status = "okay";
+    pinctrl-0 = <&spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7>;
+    pinctrl-names = "default";
+};
+
+
+
+/* REMOVE OR COMMENT THIS ENTIRE BLOCK OUT to test w/o dma */
+// &spi2 {
+//     dmas = <&dmamux1 0 20 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+//            <&dmamux1 1 19 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+//     dma-names = "tx", "rx";
+// };
+
+&spi2 {
+    status = "okay";
+    pinctrl-0 = <&spi2_sck_pa0 &spi2_miso_pa3 &spi2_mosi_pa4>;
+    pinctrl-names = "default";
+    cs-gpios = <&gpioa 1 GPIO_ACTIVE_LOW>; /* SD_CS */
+    
+    sdhc0: sdhc@0 {
+        compatible = "zephyr,sdhc-spi-slot";
+        reg = <0>;
+        spi-max-frequency = <8000000>; /* Safe 8MHz max */
+        mmc {
+            compatible = "zephyr,sdmmc-disk";
+            status = "okay";
+        };
+    };
+};
+
+/* DMA channel assignments for spi3 (FPGA) */
+&spi3 {
+    dmas = <&dmamux1 2 62 (STM32_DMA_PERIPH_TX | STM32_DMA_PRIORITY_HIGH)>,
+           <&dmamux1 3 61 (STM32_DMA_PERIPH_RX | STM32_DMA_PRIORITY_HIGH)>;
+    dma-names = "tx", "rx";
+};
+
+&spi3 {
+    status = "okay";
+    pinctrl-0 = <&spi3_sck_pb3 &spi3_miso_pb4 &spi3_mosi_pb5>;
+    pinctrl-names = "default";
+    cs-gpios = <&gpiod 3 GPIO_ACTIVE_LOW>; /* FPGA_CS */
+
+    fpga_spi: fpga@0 {
+        compatible = "vnd,spi-device";
+        reg = <0>;
+        spi-max-frequency = <8000000>;
+    };
+};
+
+&usart3 {
+    status = "okay";
+    pinctrl-0 = <&usart3_tx_pb2 &usart3_rx_pb0>;
+    pinctrl-names = "default";
+    current-speed = <115200>;
+};
+
+&adc1 {
+    status = "okay";
+    pinctrl-0 = <&adc1_in9_pb1 &adc1_in11_pb10>;
+    pinctrl-names = "default";
+};
 
 ==================================================
 

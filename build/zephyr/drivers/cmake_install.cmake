@@ -69,17 +69,37 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
+  include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/adc/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
   include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/clock_control/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
-  include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/console/cmake_install.cmake")
+  include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/dma/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
+  include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/flash/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
   include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/gpio/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
+  include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/hwinfo/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
+  include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/i2c/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
@@ -94,7 +114,17 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
+  include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/sdhc/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
   include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/serial/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
+  include("C:/Users/broqu/Desktop/InkLabSW/InkLab-Vela/inklab-firmware/build/zephyr/drivers/spi/cmake_install.cmake")
 endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)

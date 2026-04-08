@@ -16,12 +16,20 @@
 		zephyr,canbus = &fdcan1;
 	};
 	aliases {
-		led0 = &my_rgb_red;
+		led0 = &led_r;
 		sw0 = &user_button;
 		watchdog0 = &iwdg;
 		die-temp0 = &die_temp;
 		volt-sensor0 = &vref;
 		volt-sensor1 = &vbat;
+		led1 = &led_g;
+		led2 = &led_b;
+		joy-up = &joy_up;
+		joy-down = &joy_down;
+		joy-left = &joy_left;
+		joy-right = &joy_right;
+		joy-center = &joy_center;
+		gpio-pb11 = &gpio_out_pb11;
 	};
 	soc {
 		#address-cells = < 0x1 >;
@@ -116,7 +124,7 @@
 				#gpio-cells = < 0x2 >;
 				reg = < 0x50000000 0x400 >;
 				clocks = < &rcc 0x34 0x1 >;
-				phandle = < 0x28 >;
+				phandle = < 0x14 >;
 			};
 			gpiob: gpio@50000400 {
 				compatible = "st,stm32-gpio";
@@ -124,7 +132,7 @@
 				#gpio-cells = < 0x2 >;
 				reg = < 0x50000400 0x400 >;
 				clocks = < &rcc 0x34 0x2 >;
-				phandle = < 0x29 >;
+				phandle = < 0x2e >;
 			};
 			gpioc: gpio@50000800 {
 				compatible = "st,stm32-gpio";
@@ -132,7 +140,7 @@
 				#gpio-cells = < 0x2 >;
 				reg = < 0x50000800 0x400 >;
 				clocks = < &rcc 0x34 0x4 >;
-				phandle = < 0x2a >;
+				phandle = < 0x2f >;
 			};
 			gpiod: gpio@50000c00 {
 				compatible = "st,stm32-gpio";
@@ -140,6 +148,7 @@
 				#gpio-cells = < 0x2 >;
 				reg = < 0x50000c00 0x400 >;
 				clocks = < &rcc 0x34 0x8 >;
+				phandle = < 0x23 >;
 			};
 			gpiof: gpio@50001400 {
 				compatible = "st,stm32-gpio";
@@ -155,54 +164,54 @@
 				reg = < 0x50001000 0x400 >;
 				clocks = < &rcc 0x34 0x10 >;
 			};
-			adc1_in0_pa0: adc1_in0_pa0 {
-				pinmux = < 0x10 >;
-				phandle = < 0x16 >;
+			adc1_in9_pb1: adc1_in9_pb1 {
+				pinmux = < 0x230 >;
+				phandle = < 0x15 >;
 			};
-			adc1_in1_pa1: adc1_in1_pa1 {
-				pinmux = < 0x30 >;
-				phandle = < 0x17 >;
+			adc1_in11_pb10: adc1_in11_pb10 {
+				pinmux = < 0x350 >;
+				phandle = < 0x16 >;
 			};
 			dac1_out1_pa4: dac1_out1_pa4 {
 				pinmux = < 0x90 >;
-				phandle = < 0x19 >;
+				phandle = < 0x18 >;
 			};
 			fdcan1_rx_pa11: fdcan1_rx_pa11 {
 				pinmux = < 0x163 >;
-				phandle = < 0x1a >;
+				phandle = < 0x1b >;
 			};
 			fdcan2_rx_pb0: fdcan2_rx_pb0 {
 				pinmux = < 0x203 >;
-				phandle = < 0x1c >;
+				phandle = < 0x1d >;
 			};
 			fdcan1_tx_pa12: fdcan1_tx_pa12 {
 				pinmux = < 0x183 >;
-				phandle = < 0x1b >;
+				phandle = < 0x1c >;
 			};
 			fdcan2_tx_pb1: fdcan2_tx_pb1 {
 				pinmux = < 0x223 >;
-				phandle = < 0x1d >;
+				phandle = < 0x1e >;
 			};
-			i2c1_scl_pb8: i2c1_scl_pb8 {
-				pinmux = < 0x306 >;
+			i2c1_scl_pb6: i2c1_scl_pb6 {
+				pinmux = < 0x2c6 >;
 				bias-pull-up;
 				drive-open-drain;
 				phandle = < 0xa >;
 			};
-			i2c2_scl_pa11: i2c2_scl_pa11 {
-				pinmux = < 0x166 >;
+			i2c2_scl_pa9: i2c2_scl_pa9 {
+				pinmux = < 0x128 >;
 				bias-pull-up;
 				drive-open-drain;
 				phandle = < 0xc >;
 			};
-			i2c1_sda_pb9: i2c1_sda_pb9 {
-				pinmux = < 0x326 >;
+			i2c1_sda_pb7: i2c1_sda_pb7 {
+				pinmux = < 0x2e6 >;
 				bias-pull-up;
 				drive-open-drain;
 				phandle = < 0xb >;
 			};
-			i2c2_sda_pa12: i2c2_sda_pa12 {
-				pinmux = < 0x186 >;
+			i2c2_sda_pa10: i2c2_sda_pa10 {
+				pinmux = < 0x148 >;
 				bias-pull-up;
 				drive-open-drain;
 				phandle = < 0xd >;
@@ -210,44 +219,50 @@
 			spi1_miso_pa6: spi1_miso_pa6 {
 				pinmux = < 0xc0 >;
 				bias-pull-down;
-				phandle = < 0x10 >;
+				phandle = < 0xf >;
 			};
-			spi2_miso_pd3: spi2_miso_pd3 {
-				pinmux = < 0x661 >;
+			spi2_miso_pa3: spi2_miso_pa3 {
+				pinmux = < 0x60 >;
 				bias-pull-down;
-				phandle = < 0x14 >;
+				phandle = < 0x12 >;
+			};
+			spi3_miso_pb4: spi3_miso_pb4 {
+				pinmux = < 0x289 >;
+				bias-pull-down;
+				phandle = < 0x21 >;
 			};
 			spi1_mosi_pa7: spi1_mosi_pa7 {
 				pinmux = < 0xe0 >;
 				bias-pull-down;
-				phandle = < 0x11 >;
+				phandle = < 0x10 >;
 			};
-			spi2_mosi_pd4: spi2_mosi_pd4 {
-				pinmux = < 0x681 >;
+			spi2_mosi_pa4: spi2_mosi_pa4 {
+				pinmux = < 0x81 >;
 				bias-pull-down;
-				phandle = < 0x15 >;
+				phandle = < 0x13 >;
 			};
-			spi1_nss_pb0: spi1_nss_pb0 {
-				pinmux = < 0x200 >;
-				bias-pull-up;
-				phandle = < 0xe >;
-			};
-			spi2_nss_pd0: spi2_nss_pd0 {
-				pinmux = < 0x601 >;
-				bias-pull-up;
-				phandle = < 0x12 >;
+			spi3_mosi_pb5: spi3_mosi_pb5 {
+				pinmux = < 0x2a9 >;
+				bias-pull-down;
+				phandle = < 0x22 >;
 			};
 			spi1_sck_pa5: spi1_sck_pa5 {
 				pinmux = < 0xa0 >;
 				bias-pull-down;
 				slew-rate = "very-high-speed";
-				phandle = < 0xf >;
+				phandle = < 0xe >;
 			};
-			spi2_sck_pd1: spi2_sck_pd1 {
-				pinmux = < 0x621 >;
+			spi2_sck_pa0: spi2_sck_pa0 {
+				pinmux = < 0x0 >;
 				bias-pull-down;
 				slew-rate = "very-high-speed";
-				phandle = < 0x13 >;
+				phandle = < 0x11 >;
+			};
+			spi3_sck_pb3: spi3_sck_pb3 {
+				pinmux = < 0x269 >;
+				bias-pull-down;
+				slew-rate = "very-high-speed";
+				phandle = < 0x20 >;
 			};
 			tim3_ch1_pb4: tim3_ch1_pb4 {
 				pinmux = < 0x281 >;
@@ -255,7 +270,7 @@
 			};
 			tim15_ch1_pb14: tim15_ch1_pb14 {
 				pinmux = < 0x3c5 >;
-				phandle = < 0x18 >;
+				phandle = < 0x17 >;
 			};
 			usart1_rx_pc5: usart1_rx_pc5 {
 				pinmux = < 0x4a1 >;
@@ -264,6 +279,10 @@
 			usart2_rx_pa3: usart2_rx_pa3 {
 				pinmux = < 0x61 >;
 				phandle = < 0x8 >;
+			};
+			usart3_rx_pb0: usart3_rx_pb0 {
+				pinmux = < 0x204 >;
+				phandle = < 0x1a >;
 			};
 			usart1_tx_pc4: usart1_tx_pc4 {
 				pinmux = < 0x481 >;
@@ -275,13 +294,18 @@
 				bias-pull-up;
 				phandle = < 0x7 >;
 			};
+			usart3_tx_pb2: usart3_tx_pb2 {
+				pinmux = < 0x244 >;
+				bias-pull-up;
+				phandle = < 0x19 >;
+			};
 			usb_dm_pa11: usb_dm_pa11 {
 				pinmux = < 0x170 >;
-				phandle = < 0x1f >;
+				phandle = < 0x25 >;
 			};
 			usb_dp_pa12: usb_dp_pa12 {
 				pinmux = < 0x190 >;
-				phandle = < 0x20 >;
+				phandle = < 0x26 >;
 			};
 		};
 		rtc: rtc@40002800 {
@@ -443,9 +467,37 @@
 			interrupts = < 0x17 0x0 >;
 			interrupt-names = "combined";
 			status = "okay";
-			pinctrl-0 = < &i2c1_scl_pb8 &i2c1_sda_pb9 >;
+			pinctrl-0 = < &i2c1_scl_pb6 &i2c1_sda_pb7 >;
 			pinctrl-names = "default";
-			phandle = < 0x25 >;
+			phandle = < 0x2b >;
+			power_monitor_1v2: ina219@40 {
+				compatible = "ti,ina219";
+				reg = < 0x40 >;
+				shunt-milliohm = < 0x5dc >;
+				lsb-microamp = < 0xa >;
+			};
+			power_monitor_3v3_ext: ina219@43 {
+				compatible = "ti,ina219";
+				reg = < 0x43 >;
+				shunt-milliohm = < 0x3e8 >;
+				lsb-microamp = < 0xa >;
+			};
+			power_monitor_3v3_fpga: ina219@4c {
+				compatible = "ti,ina219";
+				reg = < 0x4c >;
+				shunt-milliohm = < 0x3e8 >;
+				lsb-microamp = < 0xa >;
+			};
+			power_monitor_3v3_mcu: ina219@4f {
+				compatible = "ti,ina219";
+				reg = < 0x4f >;
+				shunt-milliohm = < 0x3e8 >;
+				lsb-microamp = < 0xa >;
+			};
+			charger_0: bq25798@6b {
+				compatible = "i2c-device";
+				reg = < 0x6b >;
+			};
 		};
 		i2c2: i2c@40005800 {
 			compatible = "st,stm32-i2c-v2";
@@ -457,9 +509,9 @@
 			interrupts = < 0x18 0x0 >;
 			interrupt-names = "combined";
 			status = "okay";
-			pinctrl-0 = < &i2c2_scl_pa11 &i2c2_sda_pa12 >;
+			pinctrl-0 = < &i2c2_scl_pa9 &i2c2_sda_pa10 >;
 			pinctrl-names = "default";
-			phandle = < 0x26 >;
+			phandle = < 0x2c >;
 		};
 		spi1: arduino_spi: spi@40013000 {
 			compatible = "st,stm32-spi-fifo", "st,stm32-spi";
@@ -469,7 +521,7 @@
 			clocks = < &rcc 0x40 0x1000 >;
 			interrupts = < 0x19 0x0 >;
 			status = "okay";
-			pinctrl-0 = < &spi1_nss_pb0 &spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7 >;
+			pinctrl-0 = < &spi1_sck_pa5 &spi1_miso_pa6 &spi1_mosi_pa7 >;
 			pinctrl-names = "default";
 		};
 		spi2: spi@40003800 {
@@ -480,8 +532,18 @@
 			clocks = < &rcc 0x3c 0x4000 >;
 			interrupts = < 0x1a 0x0 >;
 			status = "okay";
-			pinctrl-0 = < &spi2_nss_pd0 &spi2_sck_pd1 &spi2_miso_pd3 &spi2_mosi_pd4 >;
+			pinctrl-0 = < &spi2_sck_pa0 &spi2_miso_pa3 &spi2_mosi_pa4 >;
 			pinctrl-names = "default";
+			cs-gpios = < &gpioa 0x1 0x1 >;
+			sdhc0: sdhc@0 {
+				compatible = "zephyr,sdhc-spi-slot";
+				reg = < 0x0 >;
+				spi-max-frequency = < 0x61a80 >;
+				mmc {
+					compatible = "zephyr,sdmmc-disk";
+					status = "okay";
+				};
+			};
 		};
 		adc1: adc@40012400 {
 			compatible = "st,stm32-adc";
@@ -494,11 +556,11 @@
 			sampling-times = < 0x3 0x5 0x8 0xd 0x14 0x28 0x50 0xa1 >;
 			num-sampling-time-common-channels = < 0x2 >;
 			st,adc-sequencer = < 0x0 >;
-			pinctrl-0 = < &adc1_in0_pa0 &adc1_in1_pa1 >;
+			pinctrl-0 = < &adc1_in9_pb1 &adc1_in11_pb10 >;
 			pinctrl-names = "default";
 			st,adc-clock-source = < 0x1 >;
 			st,adc-prescaler = < 0x4 >;
-			phandle = < 0x24 >;
+			phandle = < 0x2a >;
 		};
 		dma1: dma@40020000 {
 			compatible = "st,stm32-dma-v2";
@@ -508,7 +570,7 @@
 			clocks = < &rcc 0x38 0x1 >;
 			dma-requests = < 0x7 >;
 			dma-offset = < 0x0 >;
-			status = "disabled";
+			status = "okay";
 		};
 		dmamux1: dmamux@40020800 {
 			compatible = "st,stm32-dmamux";
@@ -518,7 +580,8 @@
 			dma-channels = < 0xc >;
 			dma-generators = < 0x4 >;
 			dma-requests = < 0x49 >;
-			status = "disabled";
+			status = "okay";
+			phandle = < 0x1f >;
 		};
 		lpuart1: serial@40008000 {
 			compatible = "st,stm32-lpuart", "st,stm32-uart";
@@ -606,7 +669,10 @@
 			clocks = < &rcc 0x3c 0x40000 >;
 			resets = < &rctl 0x592 >;
 			interrupts = < 0x1d 0x0 >;
-			status = "disabled";
+			status = "okay";
+			pinctrl-0 = < &usart3_tx_pb2 &usart3_rx_pb0 >;
+			pinctrl-names = "default";
+			current-speed = < 0x1c200 >;
 		};
 		usart4: serial@40004c00 {
 			compatible = "st,stm32-usart", "st,stm32-uart";
@@ -720,7 +786,7 @@
 			interrupts = < 0x18 0x0 >;
 			interrupt-names = "combined";
 			status = "disabled";
-			phandle = < 0x27 >;
+			phandle = < 0x2d >;
 		};
 		spi3: spi@40003c00 {
 			compatible = "st,stm32-spi-fifo", "st,stm32-spi";
@@ -729,7 +795,17 @@
 			reg = < 0x40003c00 0x400 >;
 			clocks = < &rcc 0x3c 0x8000 >;
 			interrupts = < 0x1a 0x3 >;
-			status = "disabled";
+			status = "okay";
+			dmas = < &dmamux1 0x2 0x3e 0x20440 >, < &dmamux1 0x3 0x3d 0x20480 >;
+			dma-names = "tx", "rx";
+			pinctrl-0 = < &spi3_sck_pb3 &spi3_miso_pb4 &spi3_mosi_pb5 >;
+			pinctrl-names = "default";
+			cs-gpios = < &gpiod 0x3 0x1 >;
+			fpga_spi: fpga@0 {
+				compatible = "vnd,spi-device";
+				reg = < 0x0 >;
+				spi-max-frequency = < 0x7a1200 >;
+			};
 		};
 		dma2: dma@40020400 {
 			compatible = "st,stm32-dma-v2";
@@ -739,7 +815,7 @@
 			clocks = < &rcc 0x38 0x2 >;
 			dma-requests = < 0x5 >;
 			dma-offset = < 0x7 >;
-			status = "disabled";
+			status = "okay";
 		};
 		usb: zephyr_udc0: usb@40005c00 {
 			compatible = "st,stm32-usb";
@@ -753,6 +829,9 @@
 			status = "okay";
 			pinctrl-0 = < &usb_dm_pa11 &usb_dp_pa12 >;
 			pinctrl-names = "default";
+			cdc_acm_uart0: cdc_acm_uart0 {
+				compatible = "zephyr,cdc-acm-uart";
+			};
 		};
 	};
 	cpus {
@@ -770,14 +849,14 @@
 				power-state-name = "suspend-to-idle";
 				substate-id = < 0x1 >;
 				min-residency-us = < 0x14 >;
-				phandle = < 0x21 >;
+				phandle = < 0x27 >;
 			};
 			stop1: state1 {
 				compatible = "zephyr,power-state";
 				power-state-name = "suspend-to-idle";
 				substate-id = < 0x2 >;
 				min-residency-us = < 0x64 >;
-				phandle = < 0x22 >;
+				phandle = < 0x28 >;
 			};
 		};
 	};
@@ -797,7 +876,7 @@
 			hsi-div = < 0x1 >;
 			clock-frequency = < 0xf42400 >;
 			status = "okay";
-			phandle = < 0x23 >;
+			phandle = < 0x29 >;
 		};
 		clk_lse: clk-lse {
 			#clock-cells = < 0x0 >;
@@ -865,7 +944,7 @@
 	usb_fs_phy: usbphy {
 		compatible = "usb-nop-xceiv";
 		#phy-cells = < 0x0 >;
-		phandle = < 0x1e >;
+		phandle = < 0x24 >;
 	};
 	smbus3: smbus3 {
 		compatible = "st,stm32-smbus";
@@ -887,9 +966,17 @@
 			gpios = < &gpioa 0x5 0x0 >;
 			label = "User LD4";
 		};
-		my_rgb_red: led_red {
+		led_b: led_b {
+			gpios = < &gpioc 0xd 0x1 >;
+			label = "LED_RGB2";
+		};
+		led_g: led_g {
+			gpios = < &gpioc 0xe 0x1 >;
+			label = "LED_RGB1";
+		};
+		led_r: led_r {
 			gpios = < &gpioc 0xf 0x1 >;
-			label = "RGB LED 0 (Red)";
+			label = "LED_RGB0";
 		};
 	};
 	gpio_keys {
@@ -898,6 +985,59 @@
 			label = "User";
 			gpios = < &gpioc 0xd 0x1 >;
 			zephyr,code = < 0xb >;
+		};
+	};
+	joystick {
+		compatible = "gpio-keys";
+		joy_left: button_0 {
+			gpios = < &gpioc 0x7 0x11 >;
+			label = "SW_A";
+		};
+		joy_up: button_1 {
+			gpios = < &gpiod 0x1 0x11 >;
+			label = "SW_B";
+		};
+		joy_down: button_2 {
+			gpios = < &gpiob 0x8 0x11 >;
+			label = "SW_C";
+		};
+		joy_right: button_3 {
+			gpios = < &gpiob 0x9 0x11 >;
+			label = "SW_D";
+		};
+		joy_center: button_4 {
+			gpios = < &gpiod 0x2 0x11 >;
+			label = "SW_CEN";
+		};
+	};
+	sys_ctrl {
+		compatible = "gpio-keys";
+		fpga_rst: fpga_rst {
+			gpios = < &gpiod 0x0 0x0 >;
+		};
+		fpga_ndone: fpga_ndone {
+			gpios = < &gpioa 0xf 0x0 >;
+		};
+		sd_det: sd_det {
+			gpios = < &gpioa 0x2 0x1 >;
+		};
+		pwr_en: pwr_en {
+			gpios = < &gpiob 0xd 0x0 >;
+		};
+		wkp: wkp {
+			gpios = < &gpiob 0xe 0x0 >;
+		};
+		pg: pg {
+			gpios = < &gpiob 0xc 0x0 >;
+		};
+		gpio_out_pb11: gpio_out1 {
+			gpios = < &gpiob 0xb 0x0 >;
+		};
+		gpio_out_pc6: gpio_out2 {
+			gpios = < &gpioc 0x6 0x0 >;
+		};
+		gpio_in_pb15: gpio_in1 {
+			gpios = < &gpiob 0xf 0x0 >;
 		};
 	};
 };
