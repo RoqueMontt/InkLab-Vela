@@ -1,5 +1,7 @@
 # InkLab
+
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+
 **Advanced Open-Source Heterogeneous Development Platform**
 
 InkLab started as a continuous glucose monitoring wearable, but it quickly grew into something much more flexible. It is now a general purpose embedded platform that combines a high performance MCU, an FPGA co-processor, and a browser-based interface with no installation required.
